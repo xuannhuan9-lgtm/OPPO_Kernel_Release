@@ -83,14 +83,21 @@ jobs:
           echo "=== kernel build.config.* files ==="
           ls kernel/msm-5.4/build.config.* 2>/dev/null | sort
           echo
-          echo "=== kernel arch/arm64/configs (top-level) ==="
+          echo "=== kernel arch/arm64/configs (top-level, full) ==="
           ls kernel/msm-5.4/arch/arm64/configs/ 2>/dev/null | sort
           echo
-          echo "=== kernel arch/arm64/configs/vendor ==="
+          echo "=== kernel arch/arm64/configs/vendor (full) ==="
           ls kernel/msm-5.4/arch/arm64/configs/vendor/ 2>/dev/null | sort
           echo
           echo "=== kernel/configs ==="
           ls kernel/msm-5.4/kernel/configs/ 2>/dev/null | sort
+          echo
+          echo "=== gki_defconfig present? ==="
+          for p in \
+            kernel/msm-5.4/arch/arm64/configs/gki_defconfig \
+            kernel/msm-5.4/arch/arm64/configs/vendor/gki_defconfig ; do
+            if [ -f "$p" ]; then echo "FOUND: $p"; else echo "missing: $p"; fi
+          done
 
       - name: Extract vendor tree from official modules repo
         run: |
@@ -111,8 +118,7 @@ jobs:
           }
 
       # The WLAN driver lives outside the kernel tree and must be wired in
-      # with symlinks + Kconfig/Makefile entries (this is what Rancemxn's
-      # working K10x procedure does).
+      # with symlinks + Kconfig/Makefile entries.
       - name: Wire official WLAN driver into kernel tree
         working-directory: kernel/msm-5.4
         run: |
@@ -135,10 +141,6 @@ jobs:
             "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
 
       # ------------------------------------------------- signature removal
-      # build.config.msm.* supplies the base + fragment pair that Kconfig's
-      # %.config rule consumes. We append the signing-disable directives to
-      # the fragment so they are merged in the same step as the rest of the
-      # vendor config (rather than post-hoc against out/.config).
       - name: Disable module signing in the official vendor fragment
         run: |
           FRAG="kernel/msm-5.4/arch/arm64/configs/${VENDOR_FRAGMENT}"
@@ -224,13 +226,14 @@ jobs:
           echo "CCACHE_BIN_DIR=$GITHUB_WORKSPACE/compiler/ccache-bin" >> "$GITHUB_ENV"
 
       # ----------------------------------------------- official QCOM build flow
-      # Replicates what build.config.msm.* + build.sh used to do:
-      #   1. make <vendor fragment>.config   -- Kconfig %.config rule, which
-      #      starts from the base defconfig and merges the fragment via
-      #      scripts/kconfig/merge_config.sh, then runs olddefconfig.
-      #   2. make Image.gz dtbs dtbo.img modules
-      # This is the same flow the tree was built with originally, just
-      # without the (now deleted) outer build.sh shell wrapper.
+      # Correct QCOM consolidated flow (what build.config.msm.* + build.sh
+      # did internally, minus the outer shell wrapper):
+      #   1. make <base>_defconfig     -- produce out/.config from base GKI
+      #   2. make <vendor>.config      -- Kconfig %.config rule merges the
+      #                                    vendor fragment onto out/.config
+      #                                    via scripts/kconfig/merge_config.sh
+      #   3. make olddefconfig
+      #   4. make Image.gz dtbs dtbo.img modules
       - name: Build kernel (official QCOM flow, signing disabled)
         working-directory: kernel/msm-5.4
         run: |
@@ -258,17 +261,43 @@ jobs:
 
           rm -rf "$OUT_DIR"; mkdir -p "$OUT_DIR"
 
-          # ---- 1. configure via Kconfig %.config rule (official merge path)
-          echo ">>> make O=$OUT_DIR $VENDOR_FRAGMENT"
-          make O="$OUT_DIR" "$VENDOR_FRAGMENT"
+          # ---- 1a. find a base defconfig
+          BASE=""
+          for b in \
+              gki_defconfig \
+              vendor/gki_defconfig \
+              vendor/holi_GKI.config \
+              vendor/holi_QGKI.config ; do
+            if [ -f "arch/arm64/configs/$b" ]; then
+              BASE="$b"; break
+            fi
+          done
 
-          if [ ! -f "$OUT_DIR/.config" ]; then
-            echo "ERROR: $OUT_DIR/.config was not generated."
+          if [ -z "$BASE" ]; then
+            echo "ERROR: no base defconfig found"
+            echo "top-level arch/arm64/configs/:"
+            ls arch/arm64/configs/
             exit 1
           fi
 
-          # ---- 2. belt-and-braces: strip signing again in case the fragment
-          #         merge did not fully propagate (it should, but cheap).
+          echo "=== top-level arch/arm64/configs/ ==="
+          ls arch/arm64/configs/
+
+          # ---- 1b. generate base .config
+          echo ">>> base defconfig: $BASE"
+          make O="$OUT_DIR" "$BASE"
+
+          if [ ! -f "$OUT_DIR/.config" ]; then
+            echo "ERROR: base defconfig did not produce $OUT_DIR/.config"
+            exit 1
+          fi
+
+          # ---- 1c. merge the vendor fragment onto the base .config
+          echo ">>> vendor fragment: $VENDOR_FRAGMENT"
+          make O="$OUT_DIR" "$VENDOR_FRAGMENT"
+
+          # ---- 2. belt-and-braces: strip signing again in case the merge
+          #         output somehow reintroduced it.
           scripts/config --file "$OUT_DIR/.config" \
             -d MODULE_SIG \
             -d MODULE_SIG_FORCE \
