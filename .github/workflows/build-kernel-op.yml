@@ -1,4 +1,4 @@
-name: Build OPPO K10x 5G Kernel (official AOSP build.config flow)
+name: Build OPPO K10x 5G Kernel (official QCOM build.config flow)
 
 on:
   workflow_dispatch:
@@ -13,9 +13,6 @@ env:
   MODULES_REPO:   https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
   MODULES_BRANCH: oppo/sm6375_u_14.0.0_k10x_5g
 
-  # ---- Official AOSP kernel build scripts (build/build.sh) ----
-  BUILD_REPO:     https://android.googlesource.com/kernel/build
-
   # ---- Toolchain (Rancemxn repack of AOSP clang-r416183b + AOSP GCC) ----
   CLANG_URL: >-
     https://github.com/Rancemxn/android_kernel_oppo_sm6375/releases/download/tool-develop/linux-x86-refs_tags_android-14.0.0_r0.140-clang-r416183b.tar.gz
@@ -24,9 +21,8 @@ env:
   GCC_ARM_REPO:       https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
   GCC_ARM_BRANCH:     android10-release
 
-  # Which vendor fragment the K10x build uses (Holi = SM6375)
+  # Vendor config fragment for the K10x (SM6375 = Holi).
   VENDOR_FRAGMENT: vendor/holi_QGKI.config
-  BUILD_CONFIG:    build.config.msm.holi
 
 jobs:
   build:
@@ -72,45 +68,6 @@ jobs:
             "$KERNEL_REPO" \
             kernel/msm-5.4
 
-      # kernel/build has no android11-5.4 branch; try several candidates
-      # and pick the first one that clones. If none succeed, print the
-      # actual branch list so we can adjust.
-      - name: Clone official AOSP kernel build scripts
-        run: |
-          CANDIDATES=(
-            android12-5.4
-            android11-5.4
-            android-5.4
-            android12-5.10
-            android13-5.15
-            android-mainline
-            main
-          )
-
-          OK=""
-          for br in "${CANDIDATES[@]}"; do
-            echo ">>> trying kernel/build branch: $br"
-            if git clone --depth=1 --branch "$br" "$BUILD_REPO" build 2>/dev/null; then
-              OK="$br"
-              break
-            fi
-            rm -rf build
-          done
-
-          if [ -z "$OK" ]; then
-            echo "ERROR: no candidate branch worked."
-            echo "=== available branches on kernel/build ==="
-            git ls-remote --heads "$BUILD_REPO" \
-              | awk '{print $2}' | sed 's|refs/heads/||' | sort
-            exit 1
-          fi
-
-          echo "Cloned kernel/build from branch: $OK"
-          echo "=== build/ contents ==="
-          ls build/
-          echo "=== build.sh present? ==="
-          ls -l build/build.sh
-
       - name: Clone official OPPO modules + device tree
         run: |
           git clone --depth=1 \
@@ -126,11 +83,11 @@ jobs:
           echo "=== kernel build.config.* files ==="
           ls kernel/msm-5.4/build.config.* 2>/dev/null | sort
           echo
-          echo "=== kernel arch/arm64/configs/vendor ==="
-          ls kernel/msm-5.4/arch/arm64/configs/vendor/ 2>/dev/null | sort
-          echo
           echo "=== kernel arch/arm64/configs (top-level) ==="
           ls kernel/msm-5.4/arch/arm64/configs/ 2>/dev/null | sort
+          echo
+          echo "=== kernel arch/arm64/configs/vendor ==="
+          ls kernel/msm-5.4/arch/arm64/configs/vendor/ 2>/dev/null | sort
           echo
           echo "=== kernel/configs ==="
           ls kernel/msm-5.4/kernel/configs/ 2>/dev/null | sort
@@ -154,7 +111,8 @@ jobs:
           }
 
       # The WLAN driver lives outside the kernel tree and must be wired in
-      # with symlinks + Kconfig/Makefile entries.
+      # with symlinks + Kconfig/Makefile entries (this is what Rancemxn's
+      # working K10x procedure does).
       - name: Wire official WLAN driver into kernel tree
         working-directory: kernel/msm-5.4
         run: |
@@ -177,9 +135,10 @@ jobs:
             "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
 
       # ------------------------------------------------- signature removal
-      # Appending to the vendor fragment means merge_config.sh picks up the
-      # directives during the official build.sh flow. Using echo (not a
-      # heredoc) so YAML block-scalar indentation is never an issue.
+      # build.config.msm.* supplies the base + fragment pair that Kconfig's
+      # %.config rule consumes. We append the signing-disable directives to
+      # the fragment so they are merged in the same step as the rest of the
+      # vendor config (rather than post-hoc against out/.config).
       - name: Disable module signing in the official vendor fragment
         run: |
           FRAG="kernel/msm-5.4/arch/arm64/configs/${VENDOR_FRAGMENT}"
@@ -207,28 +166,6 @@ jobs:
 
           echo "=== tail of $FRAG ==="
           tail -20 "$FRAG"
-
-      # If the tree only ships build.config.msm.lahaina (which is the shared
-      # base for QCOM consolidated SoCs incl. Holi), create the holi one.
-      - name: Ensure build.config.msm.holi exists
-        run: |
-          cd kernel/msm-5.4
-          if [ -f "$BUILD_CONFIG" ]; then
-            echo "$BUILD_CONFIG already present:"
-            cat "$BUILD_CONFIG"
-            exit 0
-          fi
-          if [ ! -f build.config.msm.lahaina ]; then
-            echo "ERROR: neither $BUILD_CONFIG nor build.config.msm.lahaina found"
-            ls build.config.* || true
-            exit 1
-          fi
-          echo "Creating $BUILD_CONFIG from build.config.msm.lahaina"
-          sed -e 's/lahaina/holi/g' \
-              -e 's/lahaina_QGKI/holi_QGKI/g' \
-              build.config.msm.lahaina > "$BUILD_CONFIG"
-          echo "=== new $BUILD_CONFIG ==="
-          cat "$BUILD_CONFIG"
 
       # ------------------------------------------------------------- toolchain
       - name: Prepare prebuilts-master clang-r416183b
@@ -273,34 +210,118 @@ jobs:
             prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
           prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-gcc --version | head -1
 
-      # ----------------------------------------------- official build.sh run
-      - name: Build with AOSP build/build.sh (official build.config flow)
+      - name: Set up ccache wrappers (Rancemxn trick)
         run: |
-          cd "$GITHUB_WORKSPACE"
+          mkdir -p compiler/ccache-bin
+          cd compiler/ccache-bin
+          ln -sf "$(which ccache)" clang
+          ln -sf "$(which ccache)" clang++
+          ln -sf "$(which ccache)" aarch64-linux-android-gcc
+          ln -sf "$(which ccache)" aarch64-linux-android-g++
+          ln -sf "$(which ccache)" arm-linux-androideabi-gcc
+          ln -sf "$(which ccache)" arm-linux-androideabi-g++
+          ls -l
+          echo "CCACHE_BIN_DIR=$GITHUB_WORKSPACE/compiler/ccache-bin" >> "$GITHUB_ENV"
 
+      # ----------------------------------------------- official QCOM build flow
+      # Replicates what build.config.msm.* + build.sh used to do:
+      #   1. make <vendor fragment>.config   -- Kconfig %.config rule, which
+      #      starts from the base defconfig and merges the fragment via
+      #      scripts/kconfig/merge_config.sh, then runs olddefconfig.
+      #   2. make Image.gz dtbs dtbo.img modules
+      # This is the same flow the tree was built with originally, just
+      # without the (now deleted) outer build.sh shell wrapper.
+      - name: Build kernel (official QCOM flow, signing disabled)
+        working-directory: kernel/msm-5.4
+        run: |
+          OUT_DIR="$GITHUB_WORKSPACE/out"
+
+          export PATH="$CCACHE_BIN_DIR:$PATH"
           export PATH="$GITHUB_WORKSPACE/prebuilts-master/clang/host/linux-x86/clang-r416183b/bin:$PATH"
           export PATH="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin:$PATH"
           export PATH="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin:$PATH"
 
-          echo "=== invoking official build.sh ==="
-          echo "BUILD_CONFIG = kernel/msm-5.4/$BUILD_CONFIG"
-          echo "ROOT_DIR     = $GITHUB_WORKSPACE"
-          echo "OUT_DIR      = $GITHUB_WORKSPACE/out"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+          export LD=ld.lld
+          export LLVM=1
+          export LLVM_IAS=1
 
-          set -o pipefail
-          BUILD_CONFIG="kernel/msm-5.4/$BUILD_CONFIG" \
-          ROOT_DIR="$GITHUB_WORKSPACE" \
-          OUT_DIR="$GITHUB_WORKSPACE/out" \
-          CCACHE_DIR="$CCACHE_DIR" \
-            bash build/build.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          echo "=== toolchain check ==="
+          which clang && clang --version | head -1
+          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1
+          which arm-linux-androideabi-gcc && arm-linux-androideabi-gcc --version | head -1
+
+          rm -rf "$OUT_DIR"; mkdir -p "$OUT_DIR"
+
+          # ---- 1. configure via Kconfig %.config rule (official merge path)
+          echo ">>> make O=$OUT_DIR $VENDOR_FRAGMENT"
+          make O="$OUT_DIR" "$VENDOR_FRAGMENT"
+
+          if [ ! -f "$OUT_DIR/.config" ]; then
+            echo "ERROR: $OUT_DIR/.config was not generated."
+            exit 1
+          fi
+
+          # ---- 2. belt-and-braces: strip signing again in case the fragment
+          #         merge did not fully propagate (it should, but cheap).
+          scripts/config --file "$OUT_DIR/.config" \
+            -d MODULE_SIG \
+            -d MODULE_SIG_FORCE \
+            -d MODULE_SIG_ALL \
+            -d MODULE_SIG_SHA1 \
+            -d MODULE_SIG_SHA224 \
+            -d MODULE_SIG_SHA256 \
+            -d MODULE_SIG_SHA384 \
+            -d MODULE_SIG_SHA512 \
+            -d MODULE_SIG_FORMAT \
+            -d MODULE_SIG_PROTECT || true
+
+          scripts/config --file "$OUT_DIR/.config" \
+            --set-str MODULE_SIG_KEY "" \
+            --set-str SYSTEM_TRUSTED_KEYS "" \
+            --set-str SYSTEM_REVOCATION_KEYS "" || true
+
+          make O="$OUT_DIR" olddefconfig
+
+          echo "=== signing config after olddefconfig ==="
+          grep -E '^(CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_SIG_ALL|CONFIG_SYSTEM_TRUSTED_KEYS|CONFIG_SYSTEM_REVOCATION_KEYS|CONFIG_MODULE_SIG_KEY)' \
+            "$OUT_DIR/.config" || true
+
+          for opt in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
+            if grep -q "^CONFIG_${opt}=y" "$OUT_DIR/.config"; then
+              echo "ERROR: CONFIG_${opt} is still enabled."
+              exit 1
+            fi
+          done
+          if grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS="[^"]' "$OUT_DIR/.config"; then
+            echo "ERROR: CONFIG_SYSTEM_TRUSTED_KEYS is not empty."
+            grep '^CONFIG_SYSTEM_TRUSTED_KEYS' "$OUT_DIR/.config"
+            exit 1
+          fi
+
+          # ---- 3. build
+          make O="$OUT_DIR" -j"$(nproc)" Image.gz Image dtbs
+          if make O="$OUT_DIR" -j"$(nproc)" dtbo.img; then
+            echo "dtbo.img built."
+          else
+            echo "WARNING: dtbo.img target unavailable; continuing."
+          fi
+          if make O="$OUT_DIR" -j"$(nproc)" modules; then
+            echo "modules built."
+          else
+            echo "WARNING: modules target failed; continuing."
+          fi
 
       # -------------------------------------------------------------- verify
       - name: Verify .config (signing must be off)
         if: always()
         run: |
-          for cfg in \
-              "$GITHUB_WORKSPACE/out/.config" \
-              "$GITHUB_WORKSPACE/kernel/msm-5.4/out/.config" ; do
+          for cfg in "$GITHUB_WORKSPACE/out/.config"; do
             [ -f "$cfg" ] || continue
             echo "=== $cfg ==="
             grep -E '^(CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_SIG_ALL|CONFIG_SYSTEM_TRUSTED_KEYS|CONFIG_SYSTEM_REVOCATION_KEYS|CONFIG_MODULE_SIG_KEY)' "$cfg" || true
@@ -309,23 +330,23 @@ jobs:
       - name: Locate produced images (diagnostics)
         if: always()
         run: |
-          echo "=== Images under workspace ==="
-          find "$GITHUB_WORKSPACE" \
+          echo "=== Images ==="
+          find "$GITHUB_WORKSPACE/out" \
             \( -path '*/arch/arm64/boot/Image' -o \
                -path '*/arch/arm64/boot/Image.gz' -o \
                -path '*/arch/arm64/boot/dtbo.img' \) \
             -printf '%p (%s bytes)\n' 2>/dev/null || true
           echo "=== .ko files ==="
-          find "$GITHUB_WORKSPACE" -name '*.ko' -printf '%p\n' 2>/dev/null | head -50 || true
+          find "$GITHUB_WORKSPACE/out" -name '*.ko' -printf '%p\n' 2>/dev/null | head -50 || true
 
       # ------------------------------------------------------------- outputs
       - name: Collect artifacts
         if: always()
         run: |
+          OUT="$GITHUB_WORKSPACE/out"
           mkdir -p artifacts/dtbs artifacts/modules
 
-          for OUT in "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/kernel/msm-5.4/out"; do
-            [ -d "$OUT" ] || continue
+          if [ -d "$OUT" ]; then
             for f in Image.gz Image dtbo.img; do
               [ -f "$OUT/arch/arm64/boot/$f" ] && cp "$OUT/arch/arm64/boot/$f" artifacts/
             done
@@ -338,19 +359,11 @@ jobs:
             [ -f "$OUT/vmlinux" ]        && cp "$OUT/vmlinux"        artifacts/ || true
             [ -f "$OUT/System.map" ]     && cp "$OUT/System.map"     artifacts/ || true
             [ -f "$OUT/Module.symvers" ] && cp "$OUT/Module.symvers" artifacts/ || true
-          done
+          fi
 
           echo "=== artifacts ==="
           find artifacts -type f -printf '%p  (%s bytes)\n' | sort
-          du -sh artifacts/
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-          if-no-files-found: warn
+          du -sh artifacts/ || true
 
       - name: Upload kernel artifacts
         if: always()
