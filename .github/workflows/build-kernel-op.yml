@@ -124,8 +124,7 @@ jobs:
           }
 
       # The WLAN driver lives outside the kernel tree and must be wired in
-      # with symlinks + Kconfig/Makefile entries (same requirement as any
-      # QCOM msm-5.4 build, official or otherwise).
+      # with symlinks + Kconfig/Makefile entries.
       - name: Wire official WLAN driver into kernel tree
         working-directory: kernel/msm-5.4
         run: |
@@ -149,8 +148,8 @@ jobs:
 
       # ------------------------------------------------- signature removal
       # build.sh merges the vendor fragment via scripts/kconfig/merge_config.sh
-      # so we append the signing-disable directives straight to that fragment.
-      # merge_config.sh honours both "# CONFIG_X is not set" and CONFIG_X="".
+      # so we append the signing-disable directives to that fragment file.
+      # Using echo (not a heredoc) to avoid YAML block-scalar indentation issues.
       - name: Disable module signing in the official vendor fragment
         run: |
           FRAG="kernel/msm-5.4/arch/arm64/configs/${VENDOR_FRAGMENT}"
@@ -160,21 +159,21 @@ jobs:
             exit 1
           fi
 
-          cat >> "$FRAG" <<'EOF'
-
-# ---- CI: disable module signing ----
-# CONFIG_MODULE_SIG is not set
-# CONFIG_MODULE_SIG_FORCE is not set
-# CONFIG_MODULE_SIG_ALL is not set
-# CONFIG_MODULE_SIG_SHA1 is not set
-# CONFIG_MODULE_SIG_SHA224 is not set
-# CONFIG_MODULE_SIG_SHA256 is not set
-# CONFIG_MODULE_SIG_SHA384 is not set
-# CONFIG_MODULE_SIG_SHA512 is not set
-CONFIG_MODULE_SIG_KEY=""
-CONFIG_SYSTEM_TRUSTED_KEYS=""
-CONFIG_SYSTEM_REVOCATION_KEYS=""
-EOF
+          {
+            echo ""
+            echo "# ---- CI: disable module signing ----"
+            echo "# CONFIG_MODULE_SIG is not set"
+            echo "# CONFIG_MODULE_SIG_FORCE is not set"
+            echo "# CONFIG_MODULE_SIG_ALL is not set"
+            echo "# CONFIG_MODULE_SIG_SHA1 is not set"
+            echo "# CONFIG_MODULE_SIG_SHA224 is not set"
+            echo "# CONFIG_MODULE_SIG_SHA256 is not set"
+            echo "# CONFIG_MODULE_SIG_SHA384 is not set"
+            echo "# CONFIG_MODULE_SIG_SHA512 is not set"
+            echo 'CONFIG_MODULE_SIG_KEY=""'
+            echo 'CONFIG_SYSTEM_TRUSTED_KEYS=""'
+            echo 'CONFIG_SYSTEM_REVOCATION_KEYS=""'
+          } >> "$FRAG"
 
           echo "=== tail of $FRAG ==="
           tail -20 "$FRAG"
@@ -202,10 +201,6 @@ EOF
           cat "$BUILD_CONFIG"
 
       # ------------------------------------------------------------- toolchain
-      # Prebuilts go in exactly the paths build.config.common / build.config.gki.*
-      # expect: $ROOT_DIR/prebuilts-master/clang/host/linux-x86/clang-r416183b
-      #         $ROOT_DIR/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-      #         $ROOT_DIR/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
       - name: Prepare prebuilts-master clang-r416183b
         run: |
           mkdir -p prebuilts-master/clang/host/linux-x86/clang-r416183b
@@ -216,7 +211,6 @@ EOF
           rm clang.tar.gz
           cd "$GITHUB_WORKSPACE"
 
-          # If the tarball had a single wrapper directory, hoist its contents.
           if [ ! -x prebuilts-master/clang/host/linux-x86/clang-r416183b/bin/clang ]; then
             NESTED_BIN="$(find prebuilts-master/clang/host/linux-x86/clang-r416183b \
                           -maxdepth 3 -type f -path '*/bin/clang' | head -1)"
@@ -254,7 +248,6 @@ EOF
         run: |
           cd "$GITHUB_WORKSPACE"
 
-          # Sanity: give build.sh a clean env
           export PATH="$GITHUB_WORKSPACE/prebuilts-master/clang/host/linux-x86/clang-r416183b/bin:$PATH"
           export PATH="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin:$PATH"
           export PATH="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin:$PATH"
