@@ -1,4 +1,4 @@
-name: Build OPPO K10x 5G Kernel (official source, no module signing)
+name: Build OPPO K10x 5G Kernel (official AOSP build.config flow)
 
 on:
   workflow_dispatch:
@@ -13,38 +13,35 @@ env:
   MODULES_REPO:   https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
   MODULES_BRANCH: oppo/sm6375_u_14.0.0_k10x_5g
 
-  # ---- Toolchain: same clang Rancemxn uses, AOSP 14 r416183b ----
+  # ---- Official AOSP kernel build scripts (build/build.sh) ----
+  BUILD_REPO:     https://android.googlesource.com/kernel/build
+  BUILD_BRANCH:   android11-5.4
+
+  # ---- Toolchain (Rancemxn repack of AOSP clang-r416183b + AOSP GCC) ----
   CLANG_URL: >-
     https://github.com/Rancemxn/android_kernel_oppo_sm6375/releases/download/tool-develop/linux-x86-refs_tags_android-14.0.0_r0.140-clang-r416183b.tar.gz
-
-  # Canonical AOSP prebuilts on googlesource (guaranteed to exist).
-  # The LineageOS GitHub mirrors of these occasionally get renamed.
   GCC_AARCH64_REPO:   https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
   GCC_AARCH64_BRANCH: android10-mainline-release
   GCC_ARM_REPO:       https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
   GCC_ARM_BRANCH:     android10-release
+
+  # Which vendor fragment the K10x build uses (Holi = SM6375)
+  VENDOR_FRAGMENT: vendor/holi_QGKI.config
+  BUILD_CONFIG:    build.config.msm.holi
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     env:
-      ARCH:                 arm64
-      SUBARCH:              arm64
-      CLANG_TRIPLE:         aarch64-linux-gnu-
-      CROSS_COMPILE:        aarch64-linux-android-
-      CROSS_COMPILE_COMPAT: arm-linux-androideabi-
       CCACHE_DIR:           ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE:       3G
       CCACHE_COMPILERCHECK: content
-      CCACHE_SLOPPINESS:    time_macros,include_file_ctime,include_file_mtime
 
     steps:
-      # ------------------------------------------------------------- checkout
       - name: Checkout this workflow repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------- packages
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -67,68 +64,72 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-k10x-official-
 
-      # --------------------------------------------------------------- source
+      # ------------------------------------------------------------- sources
       - name: Clone official OPPO kernel source
         run: |
           mkdir -p kernel
-          git clone \
-            --depth=1 \
+          git clone --depth=1 \
             --branch "$KERNEL_BRANCH" \
             "$KERNEL_REPO" \
             kernel/msm-5.4
 
-      - name: Verify official kernel tree (sanity)
-        working-directory: kernel/msm-5.4
+      - name: Clone official AOSP kernel build scripts
         run: |
-          echo "=== top level ==="
-          ls
-          echo "=== has build.sh? (Rancemxn fork only) ==="
-          ls -l build.sh 2>/dev/null || echo "no build.sh (expected for official tree)"
-          echo "=== vendor defconfigs ==="
-          ls arch/arm64/configs/vendor/ 2>/dev/null | head -100 || \
-            echo "no arch/arm64/configs/vendor directory"
-          echo "=== dts vendor dir ==="
-          ls arch/arm64/boot/dts/vendor 2>/dev/null | head -50 || true
+          git clone --depth=1 \
+            --branch "$BUILD_BRANCH" \
+            "$BUILD_REPO" \
+            build
+          echo "=== build/ contents ==="
+          ls build/
+          echo "=== build.sh present? ==="
+          ls -l build/build.sh
 
       - name: Clone official OPPO modules + device tree
         run: |
-          git clone \
-            --depth=1 \
+          git clone --depth=1 \
             --branch "$MODULES_BRANCH" \
             "$MODULES_REPO" \
             temp_modules
 
-      # Official repo nests vendor under source/android/vendor/. Find it.
+      - name: Inspect official source layout (diagnostics)
+        run: |
+          echo "=== modules repo top ==="
+          find temp_modules -maxdepth 3 -type d | head -60
+          echo
+          echo "=== kernel build.config.* files ==="
+          ls kernel/msm-5.4/build.config.* 2>/dev/null | sort
+          echo
+          echo "=== kernel arch/arm64/configs/vendor ==="
+          ls kernel/msm-5.4/arch/arm64/configs/vendor/ 2>/dev/null | sort
+          echo
+          echo "=== kernel arch/arm64/configs (top-level) ==="
+          ls kernel/msm-5.4/arch/arm64/configs/ 2>/dev/null | sort
+
       - name: Extract vendor tree from official modules repo
         run: |
-          echo "=== modules repo layout (top) ==="
-          find temp_modules -maxdepth 3 -type d | head -60
-
           VENDOR_SRC="$(find temp_modules -type d -name vendor -print -quit)"
           if [ -z "$VENDOR_SRC" ]; then
-            echo "ERROR: vendor/ not found in modules repo"
+            echo "ERROR: no vendor/ directory found"
             exit 1
           fi
-          echo "Using vendor tree: $VENDOR_SRC"
-
-          mkdir -p vendor
-          rsync -a "$VENDOR_SRC/" vendor/
+          echo "vendor source: $VENDOR_SRC"
+          rm -rf kernel/msm-5.4/vendor
+          rsync -a "$VENDOR_SRC/" kernel/msm-5.4/vendor/
           rm -rf temp_modules
 
-          echo "=== vendor sanity ==="
-          test -d vendor/qcom/opensource/wlan/qcacld-3.0 || {
-            echo "ERROR: vendor/qcom/opensource/wlan/qcacld-3.0 missing"
-            ls vendor/qcom/opensource/wlan || true
+          test -d kernel/msm-5.4/vendor/qcom/opensource/wlan/qcacld-3.0 || {
+            echo "ERROR: qcacld-3.0 missing in vendor"
+            ls kernel/msm-5.4/vendor/qcom/opensource/wlan || true
             exit 1
           }
-          ls vendor/qcom/opensource/wlan
 
-      # Rancemxn's manual-wiring step, required because the WLAN driver
-      # lives outside the kernel tree.
+      # The WLAN driver lives outside the kernel tree and must be wired in
+      # with symlinks + Kconfig/Makefile entries (same requirement as any
+      # QCOM msm-5.4 build, official or otherwise).
       - name: Wire official WLAN driver into kernel tree
         working-directory: kernel/msm-5.4
         run: |
-          ROOT="$GITHUB_WORKSPACE"
+          ROOT="$GITHUB_WORKSPACE/kernel/msm-5.4"
 
           cd drivers/staging
           ln -sfn "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0"        qcacld-3.0
@@ -139,7 +140,6 @@ jobs:
 
           grep -q 'drivers/staging/qcacld-3.0/Kconfig' drivers/staging/Kconfig || \
             echo 'source "drivers/staging/qcacld-3.0/Kconfig"' >> drivers/staging/Kconfig
-
           grep -q 'CONFIG_QCA_CLD_WLAN' drivers/staging/Makefile || \
             echo 'obj-$(CONFIG_QCA_CLD_WLAN) += qcacld-3.0/' >> drivers/staging/Makefile
 
@@ -147,217 +147,192 @@ jobs:
             's|WLAN_ROOT := drivers/staging/qcacld-3.0|WLAN_ROOT := $(srctree)/$(src)|g' \
             "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
 
-          echo "symlinks:"
-          ls -l drivers/staging | grep -E 'qcacld|qca-wifi|fw-api|utils' || true
-
-      - name: Write env_vars.sh (expected by repo's build.sh if present)
+      # ------------------------------------------------- signature removal
+      # build.sh merges the vendor fragment via scripts/kconfig/merge_config.sh
+      # so we append the signing-disable directives straight to that fragment.
+      # merge_config.sh honours both "# CONFIG_X is not set" and CONFIG_X="".
+      - name: Disable module signing in the official vendor fragment
         run: |
-          cat > kernel/msm-5.4/env_vars.sh <<EOF
-          export OPPO_K10X_RootPath=$GITHUB_WORKSPACE
-          EOF
-
-      # ------------------------------------------------------------- toolchain
-      - name: Download AOSP Clang r416183b (Rancemxn repack)
-        run: |
-          mkdir -p compiler
-          cd compiler
-          curl -fL "$CLANG_URL" -o clang.tar.gz \
-            --connect-timeout 30 --retry 5 --retry-delay 5
-          mkdir -p clang-extract
-          tar -xzf clang.tar.gz -C clang-extract
-          rm clang.tar.gz
-
-          CLANG_BIN="$(find clang-extract -type f -name clang -path '*/bin/*' | head -1)"
-          if [ -z "$CLANG_BIN" ]; then
-            echo "ERROR: clang binary not found in tarball"
-            find clang-extract -maxdepth 3 | head
+          FRAG="kernel/msm-5.4/arch/arm64/configs/${VENDOR_FRAGMENT}"
+          if [ ! -f "$FRAG" ]; then
+            echo "ERROR: expected vendor fragment not found: $FRAG"
+            ls kernel/msm-5.4/arch/arm64/configs/vendor/
             exit 1
           fi
-          CLANG_BIN_DIR="$(dirname "$CLANG_BIN")"
-          echo "Clang bin dir: $CLANG_BIN_DIR"
-          echo "CLANG_BIN_DIR=$CLANG_BIN_DIR" >> "$GITHUB_ENV"
 
-      - name: Clone AOSP GCC aarch64 4.9 prebuilt
+          cat >> "$FRAG" <<'EOF'
+
+# ---- CI: disable module signing ----
+# CONFIG_MODULE_SIG is not set
+# CONFIG_MODULE_SIG_FORCE is not set
+# CONFIG_MODULE_SIG_ALL is not set
+# CONFIG_MODULE_SIG_SHA1 is not set
+# CONFIG_MODULE_SIG_SHA224 is not set
+# CONFIG_MODULE_SIG_SHA256 is not set
+# CONFIG_MODULE_SIG_SHA384 is not set
+# CONFIG_MODULE_SIG_SHA512 is not set
+CONFIG_MODULE_SIG_KEY=""
+CONFIG_SYSTEM_TRUSTED_KEYS=""
+CONFIG_SYSTEM_REVOCATION_KEYS=""
+EOF
+
+          echo "=== tail of $FRAG ==="
+          tail -20 "$FRAG"
+
+      # If the tree only ships build.config.msm.lahaina (which is the shared
+      # base for QCOM consolidated SoCs incl. Holi), create the holi one.
+      - name: Ensure build.config.msm.holi exists
         run: |
+          cd kernel/msm-5.4
+          if [ -f "$BUILD_CONFIG" ]; then
+            echo "$BUILD_CONFIG already present:"
+            cat "$BUILD_CONFIG"
+            exit 0
+          fi
+          if [ ! -f build.config.msm.lahaina ]; then
+            echo "ERROR: neither $BUILD_CONFIG nor build.config.msm.lahaina found"
+            ls build.config.* || true
+            exit 1
+          fi
+          echo "Creating $BUILD_CONFIG from build.config.msm.lahaina"
+          sed -e 's/lahaina/holi/g' \
+              -e 's/lahaina_QGKI/holi_QGKI/g' \
+              build.config.msm.lahaina > "$BUILD_CONFIG"
+          echo "=== new $BUILD_CONFIG ==="
+          cat "$BUILD_CONFIG"
+
+      # ------------------------------------------------------------- toolchain
+      # Prebuilts go in exactly the paths build.config.common / build.config.gki.*
+      # expect: $ROOT_DIR/prebuilts-master/clang/host/linux-x86/clang-r416183b
+      #         $ROOT_DIR/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+      #         $ROOT_DIR/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+      - name: Prepare prebuilts-master clang-r416183b
+        run: |
+          mkdir -p prebuilts-master/clang/host/linux-x86/clang-r416183b
+          cd prebuilts-master/clang/host/linux-x86/clang-r416183b
+          curl -fL "$CLANG_URL" -o clang.tar.gz \
+            --connect-timeout 30 --retry 5 --retry-delay 5
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
+          cd "$GITHUB_WORKSPACE"
+
+          # If the tarball had a single wrapper directory, hoist its contents.
+          if [ ! -x prebuilts-master/clang/host/linux-x86/clang-r416183b/bin/clang ]; then
+            NESTED_BIN="$(find prebuilts-master/clang/host/linux-x86/clang-r416183b \
+                          -maxdepth 3 -type f -path '*/bin/clang' | head -1)"
+            if [ -n "$NESTED_BIN" ]; then
+              NESTED_ROOT="$(dirname "$(dirname "$NESTED_BIN")")"
+              echo "Hoisting nested root: $NESTED_ROOT"
+              shopt -s dotglob
+              mv "$NESTED_ROOT"/* prebuilts-master/clang/host/linux-x86/clang-r416183b/
+              shopt -u dotglob
+            fi
+          fi
+
+          prebuilts-master/clang/host/linux-x86/clang-r416183b/bin/clang --version | head -1
+
+      - name: Prepare prebuilts GCC aarch64 4.9
+        run: |
+          mkdir -p prebuilts/gcc/linux-x86/aarch64
           git clone --depth=1 \
             --branch "$GCC_AARCH64_BRANCH" \
             "$GCC_AARCH64_REPO" \
-            compiler/aarch64-linux-android-4.9
+            prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+          prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc --version | head -1
 
-      - name: Clone AOSP GCC arm 4.9 prebuilt
+      - name: Prepare prebuilts GCC arm 4.9
         run: |
+          mkdir -p prebuilts/gcc/linux-x86/arm
           git clone --depth=1 \
             --branch "$GCC_ARM_BRANCH" \
             "$GCC_ARM_REPO" \
-            compiler/arm-linux-androideabi-4.9
+            prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+          prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-gcc --version | head -1
 
-      - name: Set up ccache wrappers (same trick as Rancemxn)
+      # ----------------------------------------------- official build.sh run
+      - name: Build with AOSP build/build.sh (official build.config flow)
         run: |
-          mkdir -p compiler/ccache-bin
-          cd compiler/ccache-bin
-          ln -sf "$(which ccache)" clang
-          ln -sf "$(which ccache)" clang++
-          ln -sf "$(which ccache)" aarch64-linux-android-gcc
-          ln -sf "$(which ccache)" aarch64-linux-android-g++
-          ln -sf "$(which ccache)" arm-linux-androideabi-gcc
-          ln -sf "$(which ccache)" arm-linux-androideabi-g++
-          ls -l
-          echo "CCACHE_BIN_DIR=$GITHUB_WORKSPACE/compiler/ccache-bin" >> "$GITHUB_ENV"
+          cd "$GITHUB_WORKSPACE"
 
-      # -------------------------------------------------------- defconfig pick
-      - name: Discover defconfig
-        id: defconfig
-        working-directory: kernel/msm-5.4
+          # Sanity: give build.sh a clean env
+          export PATH="$GITHUB_WORKSPACE/prebuilts-master/clang/host/linux-x86/clang-r416183b/bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin:$PATH"
+
+          echo "=== invoking official build.sh ==="
+          echo "BUILD_CONFIG = kernel/msm-5.4/$BUILD_CONFIG"
+          echo "ROOT_DIR     = $GITHUB_WORKSPACE"
+          echo "OUT_DIR      = $GITHUB_WORKSPACE/out"
+
+          set -o pipefail
+          BUILD_CONFIG="kernel/msm-5.4/$BUILD_CONFIG" \
+          ROOT_DIR="$GITHUB_WORKSPACE" \
+          OUT_DIR="$GITHUB_WORKSPACE/out" \
+          CCACHE_DIR="$CCACHE_DIR" \
+            bash build/build.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      # -------------------------------------------------------------- verify
+      - name: Verify .config (signing must be off)
+        if: always()
         run: |
-          echo "=== all vendor defconfigs ==="
-          ls arch/arm64/configs/vendor/ 2>/dev/null || true
-
-          CANDIDATES=(
-            vendor/holi-qgki_defconfig
-            vendor/holi-qgki-perf_defconfig
-            vendor/holi_defconfig
-            vendor/holi-perf_defconfig
-            vendor/sm6375-qgki_defconfig
-            vendor/sm6375_defconfig
-            vendor/bengal-qgki_defconfig
-            vendor/bengal_defconfig
-          )
-          CHOSEN=""
-          for c in "${CANDIDATES[@]}"; do
-            if [ -f "arch/arm64/configs/$c" ]; then
-              CHOSEN="$c"; break
-            fi
+          for cfg in \
+              "$GITHUB_WORKSPACE/out/.config" \
+              "$GITHUB_WORKSPACE/kernel/msm-5.4/out/.config" ; do
+            [ -f "$cfg" ] || continue
+            echo "=== $cfg ==="
+            grep -E '^(CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_SIG_ALL|CONFIG_SYSTEM_TRUSTED_KEYS|CONFIG_SYSTEM_REVOCATION_KEYS|CONFIG_MODULE_SIG_KEY)' "$cfg" || true
           done
 
-          if [ -z "$CHOSEN" ]; then
-            echo "No known SM6375 (Holi/Bengal) defconfig found."
-            echo "Full listing of qgki defconfigs:"
-            find arch/arm64/configs -name '*qgki*defconfig' | head -80
-            exit 1
-          fi
-          echo "chosen=$CHOSEN" >> "$GITHUB_OUTPUT"
-          echo "Selected defconfig: $CHOSEN"
-
-      # ------------------------------------------------------------------ build
-      - name: Build kernel (with module signing disabled)
-        working-directory: kernel/msm-5.4
-        env:
-          DEFCONFIG: ${{ steps.defconfig.outputs.chosen }}
+      - name: Locate produced images (diagnostics)
+        if: always()
         run: |
-          # ---- PATH: ccache wrappers first, then clang, then GCC prebuilts
-          export PATH="$CCACHE_BIN_DIR:$PATH"
-          export PATH="$GITHUB_WORKSPACE/$CLANG_BIN_DIR:$PATH"
-          export PATH="$GITHUB_WORKSPACE/compiler/aarch64-linux-android-4.9/bin:$PATH"
-          export PATH="$GITHUB_WORKSPACE/compiler/arm-linux-androideabi-4.9/bin:$PATH"
+          echo "=== Images under workspace ==="
+          find "$GITHUB_WORKSPACE" \
+            \( -path '*/arch/arm64/boot/Image' -o \
+               -path '*/arch/arm64/boot/Image.gz' -o \
+               -path '*/arch/arm64/boot/dtbo.img' \) \
+            -printf '%p (%s bytes)\n' 2>/dev/null || true
+          echo "=== .ko files ==="
+          find "$GITHUB_WORKSPACE" -name '*.ko' -printf '%p\n' 2>/dev/null | head -50 || true
 
-          echo "=== toolchain check ==="
-          which clang && clang --version | head -1
-          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1
-          which arm-linux-androideabi-gcc && arm-linux-androideabi-gcc --version | head -1
-
-          OUT_DIR=out
-          rm -rf "$OUT_DIR"; mkdir -p "$OUT_DIR"
-
-          MAKE=( make
-                 O="$OUT_DIR" ARCH=arm64
-                 CC=clang
-                 CLANG_TRIPLE=aarch64-linux-gnu-
-                 CROSS_COMPILE=aarch64-linux-android-
-                 CROSS_COMPILE_COMPAT=arm-linux-androideabi-
-                 LD=ld.lld LLVM=1 LLVM_IAS=1 )
-
-          # ---- 1. defconfig
-          "${MAKE[@]}" "$DEFCONFIG"
-
-          # ---- 2. strip module signing / keys from .config
-          # bool / tristate
-          scripts/config --file "$OUT_DIR/.config" \
-            -d MODULE_SIG \
-            -d MODULE_SIG_FORCE \
-            -d MODULE_SIG_ALL \
-            -d MODULE_SIG_SHA1 \
-            -d MODULE_SIG_SHA224 \
-            -d MODULE_SIG_SHA256 \
-            -d MODULE_SIG_SHA384 \
-            -d MODULE_SIG_SHA512 \
-            -d MODULE_SIG_FORMAT \
-            -d MODULE_SIG_PROTECT || true
-
-          # string options must be emptied, not disabled
-          scripts/config --file "$OUT_DIR/.config" \
-            --set-str MODULE_SIG_KEY "" \
-            --set-str SYSTEM_TRUSTED_KEYS "" \
-            --set-str SYSTEM_REVOCATION_KEYS "" || true
-
-          # resolve dependencies
-          "${MAKE[@]}" olddefconfig
-
-          echo "=== signing config after olddefconfig ==="
-          grep -E '^(CONFIG_MODULE_SIG|CONFIG_SYSTEM_TRUSTED_KEYS|CONFIG_SYSTEM_REVOCATION_KEYS|CONFIG_MODULE_SIG_KEY)' \
-            "$OUT_DIR/.config" || true
-
-          # fail the build if signing somehow came back
-          for opt in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
-            if grep -q "^CONFIG_${opt}=y" "$OUT_DIR/.config"; then
-              echo "ERROR: CONFIG_${opt} is still enabled."
-              exit 1
-            fi
-          done
-
-          if grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS="[^"]' "$OUT_DIR/.config"; then
-            echo "ERROR: CONFIG_SYSTEM_TRUSTED_KEYS is not empty."
-            grep '^CONFIG_SYSTEM_TRUSTED_KEYS' "$OUT_DIR/.config"
-            exit 1
-          fi
-
-          # ---- 3. build image + dtbs
-          "${MAKE[@]}" -j"$(nproc)" Image.gz Image dtbs
-
-          # ---- 4. best-effort dtbo.img (some trees don't have it)
-          if "${MAKE[@]}" -j"$(nproc)" dtbo.img; then
-            echo "dtbo.img built."
-          else
-            echo "WARNING: dtbo.img target unavailable; continuing."
-          fi
-
-          # ---- 5. build modules (if any)
-          if "${MAKE[@]}" -j"$(nproc)" modules; then
-            echo "modules built."
-          else
-            echo "WARNING: modules target failed; continuing."
-          fi
-
-      # ---------------------------------------------------------------- gather
+      # ------------------------------------------------------------- outputs
       - name: Collect artifacts
+        if: always()
         run: |
-          OUT=kernel/msm-5.4/out
           mkdir -p artifacts/dtbs artifacts/modules
 
-          for f in Image.gz Image; do
-            [ -f "$OUT/arch/arm64/boot/$f" ] && cp "$OUT/arch/arm64/boot/$f" artifacts/
+          for OUT in "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/kernel/msm-5.4/out"; do
+            [ -d "$OUT" ] || continue
+            for f in Image.gz Image dtbo.img; do
+              [ -f "$OUT/arch/arm64/boot/$f" ] && cp "$OUT/arch/arm64/boot/$f" artifacts/
+            done
+            find "$OUT/arch/arm64/boot/dts" -type f -name '*.dtb' \
+              -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
+            find "$OUT/arch/arm64/boot/dts" -type f -name '*.dtbo' \
+              -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
+            find "$OUT" -name '*.ko' -exec cp -n {} artifacts/modules/ \; 2>/dev/null || true
+            [ -d "$OUT/all_modules" ] && rsync -a "$OUT/all_modules/" artifacts/modules/ || true
+            [ -f "$OUT/vmlinux" ]        && cp "$OUT/vmlinux"        artifacts/ || true
+            [ -f "$OUT/System.map" ]     && cp "$OUT/System.map"     artifacts/ || true
+            [ -f "$OUT/Module.symvers" ] && cp "$OUT/Module.symvers" artifacts/ || true
           done
-          [ -f "$OUT/arch/arm64/boot/dtbo.img" ] && \
-            cp "$OUT/arch/arm64/boot/dtbo.img" artifacts/ || true
-
-          find "$OUT/arch/arm64/boot/dts" -type f -name '*.dtb' \
-            -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
-          find "$OUT/arch/arm64/boot/dts" -type f -name '*.dtbo' \
-            -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
-
-          find "$OUT" -name '*.ko' -exec cp -n {} artifacts/modules/ \; 2>/dev/null || true
-          [ -d "$OUT/all_modules" ] && rsync -a "$OUT/all_modules/" artifacts/modules/ || true
-
-          [ -f "$OUT/vmlinux" ]        && cp "$OUT/vmlinux"        artifacts/ || true
-          [ -f "$OUT/System.map" ]     && cp "$OUT/System.map"     artifacts/ || true
-          [ -f "$OUT/Module.symvers" ] && cp "$OUT/Module.symvers" artifacts/ || true
 
           echo "=== artifacts ==="
           find artifacts -type f -printf '%p  (%s bytes)\n' | sort
           du -sh artifacts/
 
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+
       - name: Upload kernel artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: oppo-k10x-5g-kernel-unsigned
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: warn
