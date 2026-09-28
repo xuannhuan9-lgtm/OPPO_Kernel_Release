@@ -16,8 +16,13 @@ env:
   # ---- Toolchain: same clang Rancemxn uses, AOSP 14 r416183b ----
   CLANG_URL: >-
     https://github.com/Rancemxn/android_kernel_oppo_sm6375/releases/download/tool-develop/linux-x86-refs_tags_android-14.0.0_r0.140-clang-r416183b.tar.gz
-  GCC_AARCH64_REPO: https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-9.3
-  GCC_ARM_REPO:     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9
+
+  # Canonical AOSP prebuilts on googlesource (guaranteed to exist).
+  # The LineageOS GitHub mirrors of these occasionally get renamed.
+  GCC_AARCH64_REPO:   https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+  GCC_AARCH64_BRANCH: android10-mainline-release
+  GCC_ARM_REPO:       https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+  GCC_ARM_BRANCH:     android10-release
 
 jobs:
   build:
@@ -172,13 +177,19 @@ jobs:
           echo "Clang bin dir: $CLANG_BIN_DIR"
           echo "CLANG_BIN_DIR=$CLANG_BIN_DIR" >> "$GITHUB_ENV"
 
-      - name: Clone AOSP GCC aarch64 9.3 prebuilt
+      - name: Clone AOSP GCC aarch64 4.9 prebuilt
         run: |
-          git clone --depth=1 "$GCC_AARCH64_REPO" compiler/aarch64-linux-android-9.3
+          git clone --depth=1 \
+            --branch "$GCC_AARCH64_BRANCH" \
+            "$GCC_AARCH64_REPO" \
+            compiler/aarch64-linux-android-4.9
 
       - name: Clone AOSP GCC arm 4.9 prebuilt
         run: |
-          git clone --depth=1 "$GCC_ARM_REPO" compiler/arm-linux-androideabi-4.9
+          git clone --depth=1 \
+            --branch "$GCC_ARM_BRANCH" \
+            "$GCC_ARM_REPO" \
+            compiler/arm-linux-androideabi-4.9
 
       - name: Set up ccache wrappers (same trick as Rancemxn)
         run: |
@@ -236,7 +247,7 @@ jobs:
           # ---- PATH: ccache wrappers first, then clang, then GCC prebuilts
           export PATH="$CCACHE_BIN_DIR:$PATH"
           export PATH="$GITHUB_WORKSPACE/$CLANG_BIN_DIR:$PATH"
-          export PATH="$GITHUB_WORKSPACE/compiler/aarch64-linux-android-9.3/bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/compiler/aarch64-linux-android-4.9/bin:$PATH"
           export PATH="$GITHUB_WORKSPACE/compiler/arm-linux-androideabi-4.9/bin:$PATH"
 
           echo "=== toolchain check ==="
