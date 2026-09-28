@@ -15,7 +15,6 @@ env:
 
   # ---- Official AOSP kernel build scripts (build/build.sh) ----
   BUILD_REPO:     https://android.googlesource.com/kernel/build
-  BUILD_BRANCH:   android11-5.4
 
   # ---- Toolchain (Rancemxn repack of AOSP clang-r416183b + AOSP GCC) ----
   CLANG_URL: >-
@@ -73,12 +72,40 @@ jobs:
             "$KERNEL_REPO" \
             kernel/msm-5.4
 
+      # kernel/build has no android11-5.4 branch; try several candidates
+      # and pick the first one that clones. If none succeed, print the
+      # actual branch list so we can adjust.
       - name: Clone official AOSP kernel build scripts
         run: |
-          git clone --depth=1 \
-            --branch "$BUILD_BRANCH" \
-            "$BUILD_REPO" \
-            build
+          CANDIDATES=(
+            android12-5.4
+            android11-5.4
+            android-5.4
+            android12-5.10
+            android13-5.15
+            android-mainline
+            main
+          )
+
+          OK=""
+          for br in "${CANDIDATES[@]}"; do
+            echo ">>> trying kernel/build branch: $br"
+            if git clone --depth=1 --branch "$br" "$BUILD_REPO" build 2>/dev/null; then
+              OK="$br"
+              break
+            fi
+            rm -rf build
+          done
+
+          if [ -z "$OK" ]; then
+            echo "ERROR: no candidate branch worked."
+            echo "=== available branches on kernel/build ==="
+            git ls-remote --heads "$BUILD_REPO" \
+              | awk '{print $2}' | sed 's|refs/heads/||' | sort
+            exit 1
+          fi
+
+          echo "Cloned kernel/build from branch: $OK"
           echo "=== build/ contents ==="
           ls build/
           echo "=== build.sh present? ==="
@@ -104,6 +131,9 @@ jobs:
           echo
           echo "=== kernel arch/arm64/configs (top-level) ==="
           ls kernel/msm-5.4/arch/arm64/configs/ 2>/dev/null | sort
+          echo
+          echo "=== kernel/configs ==="
+          ls kernel/msm-5.4/kernel/configs/ 2>/dev/null | sort
 
       - name: Extract vendor tree from official modules repo
         run: |
@@ -147,9 +177,9 @@ jobs:
             "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
 
       # ------------------------------------------------- signature removal
-      # build.sh merges the vendor fragment via scripts/kconfig/merge_config.sh
-      # so we append the signing-disable directives to that fragment file.
-      # Using echo (not a heredoc) to avoid YAML block-scalar indentation issues.
+      # Appending to the vendor fragment means merge_config.sh picks up the
+      # directives during the official build.sh flow. Using echo (not a
+      # heredoc) so YAML block-scalar indentation is never an issue.
       - name: Disable module signing in the official vendor fragment
         run: |
           FRAG="kernel/msm-5.4/arch/arm64/configs/${VENDOR_FRAGMENT}"
