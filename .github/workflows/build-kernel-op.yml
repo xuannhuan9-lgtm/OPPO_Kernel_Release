@@ -1,79 +1,352 @@
-name: Build OnePlus Kernel
+name: Build OPPO K10x 5G Kernel (official source, no module signing)
 
 on:
   workflow_dispatch:
-    inputs:
-      proprietary_repo:
-        description: '闭源驱动仓库地址'
-        required: true
-        default: 'https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650'
-      proprietary_branch:
-        description: '闭源驱动仓库分支'
-        required: true
-        default: 'oneplus/sm8650_b_16.0.0_oneplus_13r'
-      kernel_repo:
-        description: '内核源码仓库地址'
-        required: true
-        default: 'https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8650'
-      kernel_branch:
-        description: '内核源码仓库分支'
-        required: true
-        default: 'oneplus/sm8650_b_16.0.0_oneplus_13r'
+
+permissions:
+  contents: read
+
+env:
+  # ---- Official OPPO source (oppo-source org) ----
+  KERNEL_REPO:    https://github.com/oppo-source/android_kernel_oppo_sm6375.git
+  KERNEL_BRANCH:  oppo/sm6375_u_14.0.0_k10x_5g
+  MODULES_REPO:   https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
+  MODULES_BRANCH: oppo/sm6375_u_14.0.0_k10x_5g
+
+  # ---- Toolchain: same clang Rancemxn uses, AOSP 14 r416183b ----
+  CLANG_URL: >-
+    https://github.com/Rancemxn/android_kernel_oppo_sm6375/releases/download/tool-develop/linux-x86-refs_tags_android-14.0.0_r0.140-clang-r416183b.tar.gz
+  GCC_AARCH64_REPO: https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-9.3
+  GCC_ARM_REPO:     https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+
+    env:
+      ARCH:                 arm64
+      SUBARCH:              arm64
+      CLANG_TRIPLE:         aarch64-linux-gnu-
+      CROSS_COMPILE:        aarch64-linux-android-
+      CROSS_COMPILE_COMPAT: arm-linux-androideabi-
+      CCACHE_DIR:           ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE:       3G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS:    time_macros,include_file_ctime,include_file_mtime
+
     steps:
-      - name: Checkout
+      # ------------------------------------------------------------- checkout
+      - name: Checkout this workflow repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      # ------------------------------------------------------------- packages
+      - name: Install build dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential libssl-dev bc flex bison git zip unzip curl wget tar xz-utils cpio rsync lzop xz-utils zstd libncurses-dev libffi-dev libbz2-dev dnsutils net-tools lsb-release aria2 pigz llvm clang lld dwarves libelf-dev libssl-dev
-      - name: Clone Proprietary Drivers
+          sudo apt-get update
+          sudo apt-get install -y \
+            git wget curl automake flex lzop bison gperf build-essential zip \
+            zlib1g-dev g++-multilib gcc-multilib libxml2-utils bzip2 libbz2-dev \
+            libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev \
+            liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl \
+            policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc \
+            libc6-dev-i386 libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip \
+            device-tree-compiler python3 ccache git-lfs gnupg imagemagick \
+            libelf-dev libncurses5-dev libsdl1.2-dev gpart fuse2fs e2fsck-static \
+            icu-doc rsync adb fastboot libstdc++6 python-is-python3
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-k10x-official-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-k10x-official-
+
+      # --------------------------------------------------------------- source
+      - name: Clone official OPPO kernel source
         run: |
-          git clone --depth=1 --branch ${{ github.event.inputs.proprietary_branch }} \
-            ${{ github.event.inputs.proprietary_repo }} proprietary_drivers
-      - name: Move Folders
+          mkdir -p kernel
+          git clone \
+            --depth=1 \
+            --branch "$KERNEL_BRANCH" \
+            "$KERNEL_REPO" \
+            kernel/msm-5.4
+
+      - name: Verify official kernel tree (sanity)
+        working-directory: kernel/msm-5.4
         run: |
-          cd proprietary_drivers
-          if [ -d "vendor" ]; then
-            echo "Moving vendor to /..."
-            sudo mv vendor /
-          fi
-          if [ -d "kernel_platform" ]; then
-            echo "Moving kernel_platform to /..."
-            sudo mv kernel_platform /
-          else
-            echo "Error: 'kernel_platform' folder not found!"
-            ls -la
+          echo "=== top level ==="
+          ls
+          echo "=== has build.sh? (Rancemxn fork only) ==="
+          ls -l build.sh 2>/dev/null || echo "no build.sh (expected for official tree)"
+          echo "=== vendor defconfigs ==="
+          ls arch/arm64/configs/vendor/ 2>/dev/null | head -100 || \
+            echo "no arch/arm64/configs/vendor directory"
+          echo "=== dts vendor dir ==="
+          ls arch/arm64/boot/dts/vendor 2>/dev/null | head -50 || true
+
+      - name: Clone official OPPO modules + device tree
+        run: |
+          git clone \
+            --depth=1 \
+            --branch "$MODULES_BRANCH" \
+            "$MODULES_REPO" \
+            temp_modules
+
+      # Official repo nests vendor under source/android/vendor/. Find it.
+      - name: Extract vendor tree from official modules repo
+        run: |
+          echo "=== modules repo layout (top) ==="
+          find temp_modules -maxdepth 3 -type d | head -60
+
+          VENDOR_SRC="$(find temp_modules -type d -name vendor -print -quit)"
+          if [ -z "$VENDOR_SRC" ]; then
+            echo "ERROR: vendor/ not found in modules repo"
             exit 1
           fi
-      - name: Clone Kernel Source
+          echo "Using vendor tree: $VENDOR_SRC"
+
+          mkdir -p vendor
+          rsync -a "$VENDOR_SRC/" vendor/
+          rm -rf temp_modules
+
+          echo "=== vendor sanity ==="
+          test -d vendor/qcom/opensource/wlan/qcacld-3.0 || {
+            echo "ERROR: vendor/qcom/opensource/wlan/qcacld-3.0 missing"
+            ls vendor/qcom/opensource/wlan || true
+            exit 1
+          }
+          ls vendor/qcom/opensource/wlan
+
+      # Rancemxn's manual-wiring step, required because the WLAN driver
+      # lives outside the kernel tree.
+      - name: Wire official WLAN driver into kernel tree
+        working-directory: kernel/msm-5.4
         run: |
-          git clone --depth=1 --branch ${{ github.event.inputs.kernel_branch }} \
-            ${{ github.event.inputs.kernel_repo }} kernel_source
-      - name: Prepare Directory Structure
+          ROOT="$GITHUB_WORKSPACE"
+
+          cd drivers/staging
+          ln -sfn "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0"        qcacld-3.0
+          ln -sfn "$ROOT/vendor/qcom/opensource/wlan/qca-wifi-host-cmn" qca-wifi-host-cmn
+          ln -sfn "$ROOT/vendor/qcom/opensource/wlan/fw-api"            fw-api
+          ln -sfn "$ROOT/vendor/qcom/opensource/wlan/utils"             utils
+          cd ../..
+
+          grep -q 'drivers/staging/qcacld-3.0/Kconfig' drivers/staging/Kconfig || \
+            echo 'source "drivers/staging/qcacld-3.0/Kconfig"' >> drivers/staging/Kconfig
+
+          grep -q 'CONFIG_QCA_CLD_WLAN' drivers/staging/Makefile || \
+            echo 'obj-$(CONFIG_QCA_CLD_WLAN) += qcacld-3.0/' >> drivers/staging/Makefile
+
+          sed -i \
+            's|WLAN_ROOT := drivers/staging/qcacld-3.0|WLAN_ROOT := $(srctree)/$(src)|g' \
+            "$ROOT/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
+
+          echo "symlinks:"
+          ls -l drivers/staging | grep -E 'qcacld|qca-wifi|fw-api|utils' || true
+
+      - name: Write env_vars.sh (expected by repo's build.sh if present)
         run: |
-          echo "Creating /kernel_platform/common..."
-          sudo mkdir -p /kernel_platform/common
-          echo "Moving kernel source to /kernel_platform/common..."
-          sudo mv kernel_source/* /kernel_platform/common/
-          sudo rm -rf kernel_source
-          echo "Final structure:"
-          ls -la /kernel_platform/
-          ls -la /kernel_platform/common/
-      - name: Build Kernel
+          cat > kernel/msm-5.4/env_vars.sh <<EOF
+          export OPPO_K10X_RootPath=$GITHUB_WORKSPACE
+          EOF
+
+      # ------------------------------------------------------------- toolchain
+      - name: Download AOSP Clang r416183b (Rancemxn repack)
         run: |
-          sudo chown -R $USER:$USER /kernel_platform
-          cd /kernel_platform/common
-          echo "Running make gki_defconfig..."
-          make ARCH=arm64 LLVM=1 O=out gki_defconfig
-          echo "Starting compilation..."
-          make ARCH=arm64 LLVM=1 O=out -j8 Image
-      - name: Upload Kernel Image
+          mkdir -p compiler
+          cd compiler
+          curl -fL "$CLANG_URL" -o clang.tar.gz \
+            --connect-timeout 30 --retry 5 --retry-delay 5
+          mkdir -p clang-extract
+          tar -xzf clang.tar.gz -C clang-extract
+          rm clang.tar.gz
+
+          CLANG_BIN="$(find clang-extract -type f -name clang -path '*/bin/*' | head -1)"
+          if [ -z "$CLANG_BIN" ]; then
+            echo "ERROR: clang binary not found in tarball"
+            find clang-extract -maxdepth 3 | head
+            exit 1
+          fi
+          CLANG_BIN_DIR="$(dirname "$CLANG_BIN")"
+          echo "Clang bin dir: $CLANG_BIN_DIR"
+          echo "CLANG_BIN_DIR=$CLANG_BIN_DIR" >> "$GITHUB_ENV"
+
+      - name: Clone AOSP GCC aarch64 9.3 prebuilt
+        run: |
+          git clone --depth=1 "$GCC_AARCH64_REPO" compiler/aarch64-linux-android-9.3
+
+      - name: Clone AOSP GCC arm 4.9 prebuilt
+        run: |
+          git clone --depth=1 "$GCC_ARM_REPO" compiler/arm-linux-androideabi-4.9
+
+      - name: Set up ccache wrappers (same trick as Rancemxn)
+        run: |
+          mkdir -p compiler/ccache-bin
+          cd compiler/ccache-bin
+          ln -sf "$(which ccache)" clang
+          ln -sf "$(which ccache)" clang++
+          ln -sf "$(which ccache)" aarch64-linux-android-gcc
+          ln -sf "$(which ccache)" aarch64-linux-android-g++
+          ln -sf "$(which ccache)" arm-linux-androideabi-gcc
+          ln -sf "$(which ccache)" arm-linux-androideabi-g++
+          ls -l
+          echo "CCACHE_BIN_DIR=$GITHUB_WORKSPACE/compiler/ccache-bin" >> "$GITHUB_ENV"
+
+      # -------------------------------------------------------- defconfig pick
+      - name: Discover defconfig
+        id: defconfig
+        working-directory: kernel/msm-5.4
+        run: |
+          echo "=== all vendor defconfigs ==="
+          ls arch/arm64/configs/vendor/ 2>/dev/null || true
+
+          CANDIDATES=(
+            vendor/holi-qgki_defconfig
+            vendor/holi-qgki-perf_defconfig
+            vendor/holi_defconfig
+            vendor/holi-perf_defconfig
+            vendor/sm6375-qgki_defconfig
+            vendor/sm6375_defconfig
+            vendor/bengal-qgki_defconfig
+            vendor/bengal_defconfig
+          )
+          CHOSEN=""
+          for c in "${CANDIDATES[@]}"; do
+            if [ -f "arch/arm64/configs/$c" ]; then
+              CHOSEN="$c"; break
+            fi
+          done
+
+          if [ -z "$CHOSEN" ]; then
+            echo "No known SM6375 (Holi/Bengal) defconfig found."
+            echo "Full listing of qgki defconfigs:"
+            find arch/arm64/configs -name '*qgki*defconfig' | head -80
+            exit 1
+          fi
+          echo "chosen=$CHOSEN" >> "$GITHUB_OUTPUT"
+          echo "Selected defconfig: $CHOSEN"
+
+      # ------------------------------------------------------------------ build
+      - name: Build kernel (with module signing disabled)
+        working-directory: kernel/msm-5.4
+        env:
+          DEFCONFIG: ${{ steps.defconfig.outputs.chosen }}
+        run: |
+          # ---- PATH: ccache wrappers first, then clang, then GCC prebuilts
+          export PATH="$CCACHE_BIN_DIR:$PATH"
+          export PATH="$GITHUB_WORKSPACE/$CLANG_BIN_DIR:$PATH"
+          export PATH="$GITHUB_WORKSPACE/compiler/aarch64-linux-android-9.3/bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/compiler/arm-linux-androideabi-4.9/bin:$PATH"
+
+          echo "=== toolchain check ==="
+          which clang && clang --version | head -1
+          which aarch64-linux-android-gcc && aarch64-linux-android-gcc --version | head -1
+          which arm-linux-androideabi-gcc && arm-linux-androideabi-gcc --version | head -1
+
+          OUT_DIR=out
+          rm -rf "$OUT_DIR"; mkdir -p "$OUT_DIR"
+
+          MAKE=( make
+                 O="$OUT_DIR" ARCH=arm64
+                 CC=clang
+                 CLANG_TRIPLE=aarch64-linux-gnu-
+                 CROSS_COMPILE=aarch64-linux-android-
+                 CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+                 LD=ld.lld LLVM=1 LLVM_IAS=1 )
+
+          # ---- 1. defconfig
+          "${MAKE[@]}" "$DEFCONFIG"
+
+          # ---- 2. strip module signing / keys from .config
+          # bool / tristate
+          scripts/config --file "$OUT_DIR/.config" \
+            -d MODULE_SIG \
+            -d MODULE_SIG_FORCE \
+            -d MODULE_SIG_ALL \
+            -d MODULE_SIG_SHA1 \
+            -d MODULE_SIG_SHA224 \
+            -d MODULE_SIG_SHA256 \
+            -d MODULE_SIG_SHA384 \
+            -d MODULE_SIG_SHA512 \
+            -d MODULE_SIG_FORMAT \
+            -d MODULE_SIG_PROTECT || true
+
+          # string options must be emptied, not disabled
+          scripts/config --file "$OUT_DIR/.config" \
+            --set-str MODULE_SIG_KEY "" \
+            --set-str SYSTEM_TRUSTED_KEYS "" \
+            --set-str SYSTEM_REVOCATION_KEYS "" || true
+
+          # resolve dependencies
+          "${MAKE[@]}" olddefconfig
+
+          echo "=== signing config after olddefconfig ==="
+          grep -E '^(CONFIG_MODULE_SIG|CONFIG_SYSTEM_TRUSTED_KEYS|CONFIG_SYSTEM_REVOCATION_KEYS|CONFIG_MODULE_SIG_KEY)' \
+            "$OUT_DIR/.config" || true
+
+          # fail the build if signing somehow came back
+          for opt in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
+            if grep -q "^CONFIG_${opt}=y" "$OUT_DIR/.config"; then
+              echo "ERROR: CONFIG_${opt} is still enabled."
+              exit 1
+            fi
+          done
+
+          if grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS="[^"]' "$OUT_DIR/.config"; then
+            echo "ERROR: CONFIG_SYSTEM_TRUSTED_KEYS is not empty."
+            grep '^CONFIG_SYSTEM_TRUSTED_KEYS' "$OUT_DIR/.config"
+            exit 1
+          fi
+
+          # ---- 3. build image + dtbs
+          "${MAKE[@]}" -j"$(nproc)" Image.gz Image dtbs
+
+          # ---- 4. best-effort dtbo.img (some trees don't have it)
+          if "${MAKE[@]}" -j"$(nproc)" dtbo.img; then
+            echo "dtbo.img built."
+          else
+            echo "WARNING: dtbo.img target unavailable; continuing."
+          fi
+
+          # ---- 5. build modules (if any)
+          if "${MAKE[@]}" -j"$(nproc)" modules; then
+            echo "modules built."
+          else
+            echo "WARNING: modules target failed; continuing."
+          fi
+
+      # ---------------------------------------------------------------- gather
+      - name: Collect artifacts
+        run: |
+          OUT=kernel/msm-5.4/out
+          mkdir -p artifacts/dtbs artifacts/modules
+
+          for f in Image.gz Image; do
+            [ -f "$OUT/arch/arm64/boot/$f" ] && cp "$OUT/arch/arm64/boot/$f" artifacts/
+          done
+          [ -f "$OUT/arch/arm64/boot/dtbo.img" ] && \
+            cp "$OUT/arch/arm64/boot/dtbo.img" artifacts/ || true
+
+          find "$OUT/arch/arm64/boot/dts" -type f -name '*.dtb' \
+            -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
+          find "$OUT/arch/arm64/boot/dts" -type f -name '*.dtbo' \
+            -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
+
+          find "$OUT" -name '*.ko' -exec cp -n {} artifacts/modules/ \; 2>/dev/null || true
+          [ -d "$OUT/all_modules" ] && rsync -a "$OUT/all_modules/" artifacts/modules/ || true
+
+          [ -f "$OUT/vmlinux" ]        && cp "$OUT/vmlinux"        artifacts/ || true
+          [ -f "$OUT/System.map" ]     && cp "$OUT/System.map"     artifacts/ || true
+          [ -f "$OUT/Module.symvers" ] && cp "$OUT/Module.symvers" artifacts/ || true
+
+          echo "=== artifacts ==="
+          find artifacts -type f -printf '%p  (%s bytes)\n' | sort
+          du -sh artifacts/
+
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
-          path: /kernel_platform/common/out/arch/arm64/boot/Image
+          name: oppo-k10x-5g-kernel-unsigned
+          path: artifacts/
+          if-no-files-found: error
