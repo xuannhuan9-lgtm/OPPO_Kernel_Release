@@ -73,7 +73,7 @@ on:
       enable_ksu:
         description: '是否集成 KernelSU-Next（关掉可做对照构建，定位卡二屏）'
         type: boolean
-        default: false
+        default: true
       ksu_hook:
         description: 'KernelSU hook 模式（5.4 非 GKI 官方推荐 syscall_table）'
         type: choice
@@ -123,6 +123,8 @@ jobs:
       CLANG_REPO_BRANCH: android-14.0.0_r0.140
       CLANG_DIR_NAME: clang-r416183b
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: '1'
 
     steps:
       - name: Checkout Workflow Repository
@@ -366,18 +368,23 @@ jobs:
           test -d drivers/kernelsu
           echo "===== KernelSU-Next 版本 ====="
           git -C KernelSU-Next log -1 --format='%H %s'
-          # KernelSU-Next 的 kernel/Kbuild 会判断 fs/namespace.c 里有没有 path_umount：
-          #   197 行用 ^int path_umount 严格匹配 -> 没找到 -> 想注入，但它的 sed 锚点
-          #         ^static bool is_mnt_ns_file 在本树不存在 -> 注入失败
-          #   302 行用 int\s+path_umount 宽松匹配 -> 误判成"已有" -> 定义 KSU_HAS_PATH_UMOUNT
-          # 结果：代码去引用一个不存在的 path_umount -> 链接失败。
-          # 5.4 树本来就该走 ksys_umount 分支，强制关掉这个宏。
+          # KernelSU-Next 的 kernel/Kbuild 会在编译 drivers/kernelsu 时，判断
+          # fs/namespace.c 里有没有 path_umount，没有就现场注入一个。
+          # 本树确实没有 -> 注入确实发生了（锚点 ^static bool is_mnt_ns_file 存在）。
+          # 但注入的时机太晚：fs/ 属于 core-y，早就编译完 fs/namespace.o 了，
+          # 而 $(shell ...) 要等 make 进入 drivers/kernelsu/ 才求值 ——
+          # 符号来不及进目标文件，于是链接期 undefined symbol: path_umount。
+          # 5.4 树本来就该走 #else 的 ksys_umount 分支，强制关掉这个宏。
           sed -i 's|^ccflags-y += -DKSU_HAS_PATH_UMOUNT|# ccflags-y += -DKSU_HAS_PATH_UMOUNT  # 强制关闭：本树无 path_umount|' \
             KernelSU-Next/kernel/Kbuild
-          echo "KSU_HAS_PATH_UMOUNT 现在只剩注释:"
+          if grep -qE "^ccflags-y \+= -DKSU_HAS_PATH_UMOUNT" KernelSU-Next/kernel/Kbuild; then
+            echo "::error::KSU_HAS_PATH_UMOUNT 没能关掉，链接仍会失败"
+            exit 1
+          fi
+          echo "✓ KSU_HAS_PATH_UMOUNT 已关闭:"
           grep -n "KSU_HAS_PATH_UMOUNT" KernelSU-Next/kernel/Kbuild || true
-          grep -n "kernelsu" drivers/Makefile
-          grep -n "kernelsu" drivers/Kconfig
+          grep -n "kernelsu" drivers/Makefile || true
+          grep -n "kernelsu" drivers/Kconfig || true
 
       - name: Set Up Swap (LTO 链接很吃内存)
         shell: bash
@@ -431,6 +438,21 @@ jobs:
           scripts/config --file out/.config --disable KEXEC_SIG            || true
           scripts/config --file out/.config --disable KEXEC_SIG_FORCE      || true
           scripts/config --file out/.config --disable SYSTEM_BLACKLIST_KEYRING || true
+          # ===== 诊断：ION / DMA / ADSP 相关配置实际生效情况 =====
+          # 卡二屏真凶怀疑：ION 的 ioctl ABI 和 vendor HAL 对不上
+          {
+            echo "===== ION / DMA-BUF / ADSP 实际配置 ====="
+            grep -E '^CONFIG_(ION|MSM_ION|DMABUF|DMA_SHARED_BUFFER|DMA_BUF|QCOM_ION|ADSP|RPMSG|MSM_ADSPRPC|SLIMBUS|QCOM_SCM)' out/.config | sort
+            echo
+            echo "===== /dev/ion 与 dmabuf 相关节点驱动 ====="
+            grep -E '^CONFIG_(SYNTHETIC|DMABUF_HEAPS|DMABUF_HEAPS_SYSTEM|ION_SYSTEM_HEAP|ION_CARVEOUT_HEAP|ION_CHUNK_HEAP|ION_CMA_HEAP|ION_MSM_HEAP)' out/.config | sort
+          } > "$RUNNER_TEMP/ion.txt" 2>&1 || true
+          echo "=========== ION 配置 ==========="
+          cat "$RUNNER_TEMP/ion.txt"
+          # 同时用 notice 发出来，方便在 GitHub 注解里直接看
+          IONMSG=$(head -c 6000 "$RUNNER_TEMP/ion.txt" | tr '\n' ' ' | sed 's/%/%25/g')
+          echo "::notice title=ION与DMA配置::${IONMSG}" || true
+
           echo "===== 签名相关配置最终状态 ====="
           for k in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY KEXEC_SIG KEXEC_SIG_FORCE; do
             grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
@@ -521,7 +543,11 @@ jobs:
           export PATH="$HOME/ccache-bin:$PATH"
           ccache -z || true
           echo "ccache: $(ccache --version | head -1)"
-          if ! make -j"$(nproc)" O=out $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+          echo "CCACHE_DIR=$CCACHE_DIR  存在? $([ -d "$CCACHE_DIR" ] && echo yes || echo no)"
+          echo "PATH 前两项: $(echo "$PATH" | cut -d: -f1,2)"
+          echo "clang 解析到: $(command -v clang)"
+          echo "ccache 解析到: $(command -v ccache)"
+          if ! make -j"$(nproc)" O=out DISABLE_WRAPPER=1 $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
             echo "========== 编译失败 =========="
             # 抓 make 的 Error 行，并把每处前面 60 行一起抓出来 —— 真正的编译器报错就在那里。
             # grep -a 防止日志里的二进制字节让 grep 只回一句 "Binary file matches"。
@@ -553,6 +579,11 @@ jobs:
             ann "日志尾部" "$RUNNER_TEMP/tail.txt"
             exit 1
           fi
+
+          # ccache 到底有没有生效？把它自己说的数字打出来
+          echo "========== ccache 统计 =========="
+          ccache -s || true
+          echo "CCACHE_DIR 内容: $(ls -A "$CCACHE_DIR" 2>/dev/null | head -5 || echo '(空)')"
 
           test -s out/arch/arm64/boot/Image.gz
           ls -lh out/arch/arm64/boot/Image.gz
