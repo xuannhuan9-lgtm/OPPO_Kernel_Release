@@ -1,114 +1,469 @@
-name: Build OPPO Kernel (Clang 11 + GCC 4.9)
+# ============================================================================
+# 【构建 B】5.4.254 分支：和手机固件同基线 + 带 NT36523 触摸驱动
+#   源码分支 : oppo/sm6375_u_14_oppo_reno9_a  (ColorOS 14 / 5.4.254)
+#   依据     : 你手机 config 有 CONFIG_TOUCHPANEL_NOVA_NT36523_NOFLASH=y，
+#              而 Novatek/NT36523_noflash 驱动目录只在 5.4.254 分支存在
+#   KernelSU : 关闭（先确认内核能开机，再开）
+#   赌的是   : 面板/触摸驱动与固件同代，一次到位
+#   产出 zip : OPPO_K10x_B_5.4.254.zip
+# ============================================================================
+name: "[B] OPPO K10x reno9_a (5.4.254)"
+
+# ============================================================================
+# 目标：OPPO 官方源码 (msm-5.4 / 5.4.233) + KernelSU-Next 官方 legacy 流程
+#       编译出能开机的内核。
+#
+# 与旧版 YAML 的差异（每条都对应一个已确认的缺陷）：
+#
+#  1. 【删掉】手工改 fs/namespace.c 的 path_umount 补丁。
+#     KernelSU-Next 的 kernel/Kbuild 会自己打 can_umount + path_umount，
+#     还会顺手补 fs/internal.h / seccomp.h / SELinux。手工插的
+#     ksu_can_umount 让 Kbuild 的 grep -Eq "^static int can_umount" 失配，
+#     于是它又插一个没人用的 can_umount。
+#
+#  2. 【修】KernelSU hook 模式。5.4 必须用 KSU_SYSCALL_TABLE_HOOK。
+#     Kconfig 原文：KSU_KPROBES_HOOK "should not be used on kernel below 5.10"。
+#     旧版写的 CONFIG_KSU_KPROBE_HOOKS 这个符号根本不存在（真名 KSU_KPROBES_HOOK），
+#     而因为 stock config 里 KPROBES=y，choice 的默认值正好落在
+#     KSU_KPROBES_HOOK —— 也就是官方明确说「5.10 以下别用」的那一档。
+#
+#  3. 【加】make dtbs。旧版只 make Image.gz，arch/arm64/boot/dts/Makefile 里
+#     vendor 是条件包含（wildcard 到 vendor/Makefile 才加），默认目标又不含
+#     dtbs —— 结果一个 DTB 都没编，而且不报错。
+#
+#  4. 【加】软链接自检。内核仓库里有 97 个软链接（如 drivers/power/oplus ->
+#     ../../../../vendor/oplus/kernel/charger/），只有内核树位于
+#     <X>/kernel/msm-5.4 且 DT 仓库的 vendor/ 位于 <X>/vendor 时才成立。
+#     断了就是「能编过、缺一堆 OPPO 驱动」。
+#
+#  5. 【加】符号丢失报告。olddefconfig 会把你 defconfig 里在本源码树中
+#     不存在的 CONFIG 静默丢掉，直接列出来。
+#
+#  6. 【加】可选的「无 KernelSU 对照构建」（bisect 用）。
+#
+#  7. 【修】AnyKernel3 默认模板带 do.devicecheck=1 + device.name1=maguro，
+#     必须关掉机型校验。
+#
+#  8. 【修】去掉 LLVM_IAS=1。根 Makefile 第 661 行是 ifneq ($(LLVM_IAS),1)，
+#     说明这个变量在本树里确实生效；而官方 build.config.* 从不设置它 →
+#     stock 用的是 GNU as。Android 也是从 clang 12 起才在 arm64 上默认启用
+#     集成汇编器，clang 11 + 集成汇编器不在官方支持范围内。
+#
+#  9. 【修】KCFLAGS 补上官方 build.config.common 里的 -D__ANDROID_COMMON_KERNEL__。
+#     原来写 KCFLAGS="-Wno-error" 会把这个编译期宏直接丢掉。
+#
+# 10. 【加】kernel_commit / devicetree_commit 输入：手机上 uname -r 的 -g<hash>
+#     就是 stock 内核的源码 commit。如果手机固件比仓库 HEAD 新，必须按那个
+#     commit 构建，否则「config 对得上、驱动代码对不上」照样卡二屏。
+#
+# 11. 源码版本 vs 固件版本：oppo/sm6375_u_14.0.0_k10x_5g 的 SUBLEVEL=233，
+#     真机 uname -r = 5.4.254-qgki-g6818c821e42d。但已证实非官方 5.4.233 内核
+#     （ResukiSU+susfs，同一分支）能在该手机上正常开机 —— 所以版本差异
+#     不是卡二屏的充分原因，只是一条值得留意的差异。因此默认仍用 k10x 分支，
+#     以复刻那个「能开机」的参考构建、尽量少引入变量。
+#
+# 12. 【加】source_branch + phone_kernel_release 输入 + 版本一致性检查（警告级）。
+#     公开仓库里 5.4.254 的分支是 oppo/sm6375_v_15.0.0 和
+#     oppo/sm6375_u_14_oppo_reno9_a，需要时可切换。
+# ============================================================================
 
 on:
   workflow_dispatch:
     inputs:
-      proprietary_repo:
-        description: '闭源驱动仓库地址'
-        required: true
-        default: 'https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375'
-      proprietary_branch:
-        description: '闭源驱动仓库分支'
-        required: true
-        default: 'oppo/sm6375_t_13.1.0_oppo_a1_5g'
-      kernel_repo:
-        description: '内核源码仓库地址'
-        required: true
-        default: 'https://github.com/GanPengZx/android_kernel_oppo_sm6375'
-      kernel_branch:
-        description: '内核源码仓库分支'
-        required: true
-        default: 'oppo/sm6375_t_13.1.0_oppo_a1_5g'
-      defconfig:
-        description: '内核配置文件'
-        required: true
-        default: 'phs110_defconfig'
+      enable_ksu:
+        description: '是否集成 KernelSU-Next（关掉可做对照构建，定位卡二屏）'
+        type: boolean
+        default: false
+      ksu_hook:
+        description: 'KernelSU hook 模式（5.4 非 GKI 官方推荐 syscall_table）'
+        type: choice
+        options:
+          - syscall_table
+          - kprobes
+        default: syscall_table
+      kernel_release_suffix:
+        description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
+        type: string
+        default: '-qgki-g6818c821e42d'
+      build_dtbs:
+        description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
+        type: boolean
+        default: true
+      source_branch:
+        description: '源码分支。★必须和手机固件的 5.4.x 版本一致，否则卡二屏'
+        type: string
+        default: 'oppo/sm6375_u_14_oppo_reno9_a'
+      phone_kernel_release:
+        description: '手机上「设置→关于手机→内核版本」的完整字符串，如 5.4.254-qgki-g6818c821e42d'
+        type: string
+        default: '5.4.254-qgki-g6818c821e42d'
+      kernel_commit:
+        description: '（可选）内核仓库要构建的确切 commit。填手机上 uname -r 里 -g 后面那串，可保证和固件同源'
+        type: string
+        default: ''
+      devicetree_commit:
+        description: '（可选）devicetree 仓库要构建的确切 commit'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    name: Build OPPO K10x Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    env:
+      # SOURCE_BRANCH 由「Resolve Build Inputs」步骤按输入写入
+      KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_sm6375.git
+      DRIVER_REPO: https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
+      # stock 内核是 clang 11.0.2 编的：defconfig 里 CONFIG_CLANG_VERSION=110002
+      CLANG_REPO_BRANCH: android11-qpr3-release
+      CLANG_DIR_NAME: clang-r383902b1
 
     steps:
-      - name: Checkout
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
+      - name: Resolve Build Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_BRANCH=${{ inputs.source_branch }}" >> "$GITHUB_ENV"
+          echo "PHONE_KERNEL_RELEASE=${{ inputs.phone_kernel_release }}" >> "$GITHUB_ENV"
+          echo "内核源码分支 : ${{ inputs.source_branch }}"
+          echo "手机内核版本 : ${{ inputs.phone_kernel_release }}"
+
       - name: Install Dependencies
+        shell: bash
         run: |
-          sudo apt update
-          sudo apt install -y build-essential libssl-dev bc flex bison git zip unzip curl wget tar xz-utils cpio rsync lzop xz-utils zstd libncurses-dev libffi-dev libbz2-dev dnsutils net-tools lsb-release aria2 pigz
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git gnupg gperf \
+            libncurses-dev libssl-dev libxml2-utils lzop rsync schedtool \
+            squashfs-tools xsltproc zip unzip zlib1g-dev python3 \
+            python-is-python3 cpio device-tree-compiler libelf-dev dwarves
 
-      - name: Set swap to 10G
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 10
-
-      # 克隆工具链：Clang 11 和 GCC 4.9
-      - name: Setup Toolchains (Clang 11 + GCC 4.9)
+      - name: Clone Official Kernel Source
+        shell: bash
         run: |
-          cd /tmp
-          
-          echo "====== 克隆 Clang 11 ======"
-          git clone --depth=1 -b 11.x https://gitlab.com/stormbreaker-project/google-clang clang-11
-          
-          echo "====== 克隆 GCC 4.9 (64位) ======"
-          git clone --depth=1 https://github.com/stormbreaker-project/aarch64-linux-android-4.9 gcc64
-          
-          echo "====== 克隆 GCC 4.9 (32位) ======"
-          git clone --depth=1 https://github.com/stormbreaker-project/arm-linux-androideabi-4.9 gcc32
-          
-          echo "Toolchains setup finished."
-          /tmp/clang-11/bin/clang --version
+          set -euxo pipefail
+          git clone --depth=1 --single-branch --branch "$SOURCE_BRANCH" "$KERNEL_REPO" kernel
+          if [ -n "${{ inputs.kernel_commit }}" ]; then
+            git -C kernel fetch --depth=1 origin "${{ inputs.kernel_commit }}" \
+              || git -C kernel fetch origin "$SOURCE_BRANCH"
+            git -C kernel checkout --detach "${{ inputs.kernel_commit }}"
+          fi
+          test -f kernel/Makefile
+          git -C kernel log -1 --format='%H %s'
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' kernel/Makefile
 
-      #- name: Clone Proprietary Drivers to /modules
-        #run: |
-         # sudo rm -rf /modules
-          #sudo git clone --depth=1 --branch ${{ github.event.inputs.proprietary_branch }} \
-           # ${{ github.event.inputs.proprietary_repo }} /modules
+      - name: Verify Source Version Matches Phone Firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          get() { grep -E "^$1[[:space:]]*=" kernel/Makefile | head -1 | tr -dc '0-9'; }
+          SRC_VER="$(get VERSION).$(get PATCHLEVEL).$(get SUBLEVEL)"
+          echo "源码内核版本: $SRC_VER"
 
-      - name: Clone Kernel Source to /kernel/msm-5.4
-        run: |
-          sudo rm -rf /kernel/msm-5.4
-          sudo mkdir -p /kernel
-          sudo git clone --depth=1 --branch ${{ github.event.inputs.kernel_branch }} \
-            ${{ github.event.inputs.kernel_repo }} kernel/msm-5.4
-      - name: Fix Permissions
-        run: |
-          sudo chown -R $USER:$USER kernel
-          sudo chmod -R 755 kernel
+          if [ -z "${PHONE_KERNEL_RELEASE:-}" ]; then
+            echo "::warning::没填 phone_kernel_release，跳过一致性检查。强烈建议填手机上的完整 uname -r"
+            exit 0
+          fi
 
-      - name: Build Kernel (Clang 11 + GCC 4.9)
+          PHONE_VER=$(echo "$PHONE_KERNEL_RELEASE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+          echo "手机内核版本: $PHONE_VER"
+
+          if [ "$SRC_VER" != "$PHONE_VER" ]; then
+            echo "::warning::源码 $SRC_VER != 手机固件 $PHONE_VER，版本不一致。"
+            echo "  ★ 已查实：你的触摸 IC 是 NT36523，而 Novatek/NT36523_noflash 驱动目录"
+            echo "    只存在于 5.4.254 分支；5.4.233(k10x) 分支里根本没有这个驱动。"
+            echo "    用 5.4.233 编会把 CONFIG_TOUCHPANEL_NOVA_NT36523_NOFLASH 静默丢掉"
+            echo "    → 触摸 IC 只能走通用 novatek 路径 → 亮屏后 3~4 秒触控失效。"
+            echo "    所以默认用 oppo/sm6375_u_14_oppo_reno9_a（5.4.254 + ColorOS 14）。"
+          else
+            echo "版本一致"
+          fi
+
+      - name: Clone Official Modules and Devicetree
+        shell: bash
         run: |
-          cd kernel/msm-5.4
-          
-          # 设置工具链路径：Clang 11 在前，GCC 4.9 在后
-          export PATH=/tmp/clang-11/bin:/tmp/gcc64/bin:/tmp/gcc32/bin:$PATH
-          
-          echo "Generating defconfig: ${{ github.event.inputs.defconfig }}"
-          make -j1 \
-               ARCH=arm64 \
-               LLVM=1 \
-               LLVM_IAS=1 \
-               CC=clang \
-               LD=ld.lld \
-               CLANG_TRIPLE=aarch64-linux-gnu- \
-               CROSS_COMPILE=aarch64-linux-android- \
-               CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-               ${{ github.event.inputs.defconfig }}
-          
-          echo "Starting compilation..."
-          make -j1 \
-               ARCH=arm64 \
-               LLVM=1 \
-               LLVM_IAS=1 \
-               CC=clang \
-               LD=ld.lld \
-               CLANG_TRIPLE=aarch64-linux-gnu- \
-               CROSS_COMPILE=aarch64-linux-android- \
-               CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-               dtbs
+          set -euxo pipefail
+          git clone --depth=1 --single-branch --branch "$SOURCE_BRANCH" "$DRIVER_REPO" devicetree
+          if [ -n "${{ inputs.devicetree_commit }}" ]; then
+            git -C devicetree fetch --depth=1 origin "${{ inputs.devicetree_commit }}" \
+              || git -C devicetree fetch origin "$SOURCE_BRANCH"
+            git -C devicetree checkout --detach "${{ inputs.devicetree_commit }}"
+          fi
+          git -C devicetree log -1 --format='%H %s'
+          test -d devicetree/kernel/msm-5.4/techpack
+          test -d devicetree/vendor/oplus/kernel
+          test -d devicetree/vendor/qcom/proprietary/devicetree
+
+      # ----------------------------------------------------------------------
+      # 组装内核树：必须是 <X>/kernel/msm-5.4  +  <X>/vendor
+      # 这里 <X> = $GITHUB_WORKSPACE/devicetree
+      # ----------------------------------------------------------------------
+      - name: Assemble Kernel Tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KERNEL_DIR="$GITHUB_WORKSPACE/kernel"
+          DRIVER_DIR="$GITHUB_WORKSPACE/devicetree"
+          BUILD_DIR="$DRIVER_DIR/kernel/msm-5.4"
+
+          test -d "$BUILD_DIR"
+
+          # 1) 内核源码覆盖进去（DT 仓库原有的 techpack/ 会被保留并补全）
+          rsync -a --exclude='.git' "$KERNEL_DIR/" "$BUILD_DIR/"
+
+          # 2) 删掉 DT 仓库自己的 .git。内核树嵌在它的工作区里，
+          #    scripts/setlocalversion 会一路往上找到这个 .git，
+          #    于是把内核版本串算成 devicetree 仓库的 -g<hash>-dirty。
+          rm -rf "${DRIVER_DIR:?}/.git"
+
+          # 3) techpack 校验：内核仓库自带的是 stub，真货来自 DT 仓库
+          for d in audio camera dataipa display video; do
+            test -d "$BUILD_DIR/techpack/$d" || { echo "::error::techpack/$d 缺失"; exit 1; }
+          done
+
+          # 4) 软链接自检：这 97 个链接断了就是「编得过但缺驱动」
+          broken=0
+          for l in \
+            arch/arm64/boot/dts/vendor \
+            drivers/power/oplus \
+            drivers/soc/oplus/system \
+            drivers/soc/oplus/device_info \
+            drivers/soc/oplus/thermal \
+            drivers/input/touchscreen/oplus_touchscreen_v2 \
+            drivers/misc/oplus_rf_cable_monitor.c \
+            net/oplus_modules \
+            mm/healthinfo \
+            mm/mm_osvelte \
+            kernel/sched_assist ; do
+            if [ ! -e "$BUILD_DIR/$l" ]; then
+              echo "::error::软链接解析失败: $l -> $(readlink "$BUILD_DIR/$l" 2>/dev/null)"
+              broken=1
+            fi
+          done
+          [ "$broken" -eq 0 ]
+
+          test -f "$BUILD_DIR/Makefile"
+          test -f "$BUILD_DIR/scripts/config"
+          echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
+          echo "===== 组装完成 ====="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' "$BUILD_DIR/Makefile"
+
+      - name: Clone Clang 11.0.2
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TOOLCHAIN_DIR="$GITHUB_WORKSPACE/toolchains"
+          mkdir -p "$TOOLCHAIN_DIR"
+          git clone --depth=1 --filter=blob:none --sparse \
+            --branch "$CLANG_REPO_BRANCH" \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86.git \
+            "$TOOLCHAIN_DIR/clang-repo"
+          git -C "$TOOLCHAIN_DIR/clang-repo" sparse-checkout set "$CLANG_DIR_NAME"
+          CLANG_DIR="$TOOLCHAIN_DIR/clang-repo/$CLANG_DIR_NAME"
+          test -x "$CLANG_DIR/bin/clang"
+          test -x "$CLANG_DIR/bin/ld.lld"
+          "$CLANG_DIR/bin/clang" --version
+          echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Clone GCC 4.9 (aarch64 + arm32)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          T="$GITHUB_WORKSPACE/toolchains"
+          mkdir -p "$T"
+          git clone --depth=1 --single-branch --branch android-8.1.0_r68 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git \
+            "$T/gcc64"
+          git clone --depth=1 --single-branch --branch android-8.1.0_r68 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git \
+            "$T/gcc32"
+          test -x "$T/gcc64/bin/aarch64-linux-android-gcc"
+          test -x "$T/gcc32/bin/arm-linux-androideabi-gcc"
+
+      # ----------------------------------------------------------------------
+      # KernelSU-Next 官方非 GKI 集成：走 legacy 分支，不要手工改 fs/namespace.c
+      # ----------------------------------------------------------------------
+      - name: Integrate KernelSU-Next (legacy)
+        if: ${{ inputs.enable_ksu }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
+          test -d drivers/kernelsu
+          echo "===== KernelSU-Next 版本 ====="
+          git -C KernelSU-Next log -1 --format='%H %s'
+          grep -n "kernelsu" drivers/Makefile
+          grep -n "kernelsu" drivers/Kconfig
+
+      - name: Configure Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+
+          DEFCONFIG="$GITHUB_WORKSPACE/k10x_defconfig"
+          test -f "$DEFCONFIG"
+
+          mkdir -p out
+          cp "$DEFCONFIG" out/.config
+
+          if [ "${{ inputs.enable_ksu }}" = "true" ]; then
+            scripts/config --file out/.config --enable KSU
+
+            if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              scripts/config --file out/.config \
+                --disable KSU_MANUAL_HOOK \
+                --enable  KSU_KPROBES_HOOK \
+                --disable KSU_SYSCALL_TABLE_HOOK
+            else
+              scripts/config --file out/.config \
+                --disable KSU_MANUAL_HOOK \
+                --disable KSU_KPROBES_HOOK \
+                --enable  KSU_SYSCALL_TABLE_HOOK
+            fi
+          fi
+
+          # stock 是 MODULE_SIG_FORCE=y，自己编的模块没有官方签名，关掉
+          scripts/config --file out/.config --disable MODULE_SIG_FORCE
+
+          # 钉死内核版本串：/vendor 里 stock 的 .ko 靠 vermagic 校验，
+          # 版本串变了它们就全部加载失败
+          if [ -n "${{ inputs.kernel_release_suffix }}" ]; then
+            scripts/config --file out/.config \
+              --disable LOCALVERSION_AUTO \
+              --set-str LOCALVERSION "${{ inputs.kernel_release_suffix }}"
+          fi
+
+          # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
+          scripts/config --file out/.config --disable DEBUG_INFO
+
+          export PATH="$CLANG_DIR/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CC=clang LD=ld.lld LLVM=1
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc64/bin/aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
+
+          make O=out olddefconfig
+
+          echo "===== KernelSU 配置 ====="
+          grep -E 'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES)=' out/.config || true
+
+          # 符号丢失报告：defconfig 里被 olddefconfig 静默丢掉的开关
+          echo "===== 被丢弃的符号（=y/=m 但最终没生效）====="
+          python3 - "$DEFCONFIG" out/.config <<'PY'
+          import re, sys
+          def load(p):
+              d = {}
+              for line in open(p, errors="replace"):
+                  m = re.match(r'(CONFIG_[A-Za-z0-9_]+)=(.*)', line.strip())
+                  if m:
+                      d[m.group(1)] = m.group(2)
+              return d
+          src, dst = load(sys.argv[1]), load(sys.argv[2])
+          lost = sorted(k for k, v in src.items()
+                        if v in ("y", "m") and dst.get(k) not in ("y", "m"))
+          print("输入 %d 个 =y/=m，输出 %d 个" % (len(src), sum(1 for v in dst.values() if v in ("y", "m"))))
+          print("被丢弃 %d 个：" % len(lost))
+          for k in lost:
+              print("   ", k)
+          PY
+
+          echo "===== 内核版本串 ====="
+          make O=out -s kernelrelease
+
+      - name: Build Kernel Image and DTBs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+
+          export PATH="$CLANG_DIR/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CC=clang LD=ld.lld LLVM=1
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc64/bin/aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
+          export KCFLAGS="-Wno-error -D__ANDROID_COMMON_KERNEL__"
+
+          # LTO_CLANG + CFI_CLANG 的 vmlinux 链接很吃内存；OOM 就把 -j 调小
+          TARGETS="Image.gz"
+          if [ "${{ inputs.build_dtbs }}" = "true" ]; then
+            TARGETS="$TARGETS dtbs"
+          fi
+
+          make -j"$(nproc)" O=out $TARGETS
+
+          test -s out/arch/arm64/boot/Image.gz
+          ls -lh out/arch/arm64/boot/Image.gz
+
+          echo "===== 编出来的 DTB / DTBO ====="
+          find out/arch/arm64/boot/dts/vendor \( -name '*.dtb' -o -name '*.dtbo' \) 2>/dev/null | head -50 || true
+
+      - name: Clone and Configure AnyKernel3
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp "$BUILD_DIR/out/arch/arm64/boot/Image.gz" AnyKernel3/Image.gz
+
+          # 默认模板是给 Galaxy Nexus 的：device.name1=maguro，机型校验会拒绝 K10x
+          sed -i 's/^do\.devicecheck=.*/do.devicecheck=0/'   AnyKernel3/anykernel.sh
+          sed -i 's/^do\.modules=.*/do.modules=0/'           AnyKernel3/anykernel.sh
+          sed -i 's/^BLOCK=.*/BLOCK=boot/'                   AnyKernel3/anykernel.sh
+          sed -i 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=auto/' AnyKernel3/anykernel.sh
+
+          echo "===== anykernel.sh 关键项 ====="
+          grep -E '^(do\.devicecheck|do\.modules|do\.systemless|do\.cleanup|BLOCK|IS_SLOT_DEVICE|RAMDISK_COMPRESSION)=' AnyKernel3/anykernel.sh
+
+          # 注意：不要把 dtb 放进 zip。stock boot 镜像里的 DTB 与源码同源，
+          # 完全兼容；放错一个 DTB 反而会直接卡一屏。
+
+      - name: Package AnyKernel3
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd AnyKernel3
+          zip -r9 "$GITHUB_WORKSPACE/OPPO_K10x_B_5.4.254.zip" . \
+            -x '.git/*' -x '.git/**' -x 'README.md' -x 'patch/*'
 
       - name: Upload Kernel Image
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
-          path: kernel/msm-5.4/out/arch/arm64/boot/dts/17107/*.dtb
+          name: OPPO-K10x-B-Image-gz
+          path: ${{ env.BUILD_DIR }}/out/arch/arm64/boot/Image.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload AnyKernel3 Package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OPPO-K10x-B
+          path: OPPO_K10x_B_5.4.254.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload DTBs
+        if: ${{ success() && inputs.build_dtbs }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: OPPO-K10x-B-DTBs
+          path: |
+            ${{ env.BUILD_DIR }}/out/arch/arm64/boot/dts/vendor/**/*.dtb
+            ${{ env.BUILD_DIR }}/out/arch/arm64/boot/dts/vendor/**/*.dtbo
+          if-no-files-found: warn
+          retention-days: 7
