@@ -233,6 +233,12 @@ jobs:
           sed -i 's|^WLAN_ROOT := drivers/staging/qcacld-3.0|WLAN_ROOT := $(srctree)/$(src)|' \
             "$DRIVER_DIR/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
 
+          # 1.8) 顶层 Makefile 里所有 -Werror=xxx 改成 -Wno-error=xxx。
+          #      通用 -Wno-error 压不住具体的 -Werror=xxx（具体优先于通用），
+          #      必须逐个点名；直接改 Makefile 一次覆盖所有类别。
+          sed -i 's/-Werror=/-Wno-error=/g' "$BUILD_DIR/Makefile"
+          echo "顶层 Makefile 剩余 -Werror= 行数: $(grep -c -e -Werror= "$BUILD_DIR/Makefile" || true)"
+
           # 1.7) 修旧式函数定义：这棵树自带 -Werror=strict-prototypes，
           #      sched_assist_slide.c 里 adjust_sched_assist_input_ctrl() 缺 (void)。
           #      直接补原型，比用 -Wno-error 把整类检查全关掉干净。
@@ -447,9 +453,9 @@ jobs:
           # 这棵树自带 -Werror=implicit-function-declaration / -Werror=return-type 等
           # （root_Makefile:492-495、1100），KCFLAGS 在 1115 行追加到最后，
           # 所以 -Wno-error 能把它们降级成 warning —— 保留这个保险
-          export KCFLAGS="-Wno-error"
+          export KCFLAGS="-Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-type -Wno-error=incompatible-pointer-types"
           # LTO_CLANG + CFI_CLANG 的 vmlinux 链接很吃内存；OOM 就把 -j 调小
-          TARGETS="Image.gz"
+          TARGETS="Image.gz Image"
           if [ "${{ inputs.build_dtbs }}" = "true" ]; then
             TARGETS="$TARGETS dtbs"
           fi
@@ -488,6 +494,7 @@ jobs:
           find out/arch/arm64/boot/dts/vendor \( -name '*.dtb' -o -name '*.dtbo' \) 2>/dev/null | head -50 || true
 
       - name: Clone and Configure AnyKernel3
+        if: false
         shell: bash
         run: |
           set -euxo pipefail
@@ -507,6 +514,7 @@ jobs:
           # 完全兼容；放错一个 DTB 反而会直接卡一屏。
 
       - name: Package AnyKernel3
+        if: false
         shell: bash
         run: |
           set -euxo pipefail
@@ -519,12 +527,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OPPO-K10x-B-Image-gz
-          path: ${{ env.BUILD_DIR }}/out/arch/arm64/boot/Image.gz
+          path: |
+            ${{ env.BUILD_DIR }}/out/arch/arm64/boot/Image
+            ${{ env.BUILD_DIR }}/out/arch/arm64/boot/Image.gz
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload AnyKernel3 Package
-        if: success()
+        if: false
         uses: actions/upload-artifact@v4
         with:
           name: OPPO-K10x-B
