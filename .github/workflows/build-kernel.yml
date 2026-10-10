@@ -120,8 +120,8 @@ jobs:
       KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_sm6375.git
       DRIVER_REPO: https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
       # stock 内核是 clang 11.0.2 编的：defconfig 里 CONFIG_CLANG_VERSION=110002
-      CLANG_REPO_BRANCH: android11-qpr3-release
-      CLANG_DIR_NAME: clang-r383902b1
+      CLANG_REPO_BRANCH: android-14.0.0_r0.140
+      CLANG_DIR_NAME: clang-r416183b
 
     steps:
       - name: Checkout Workflow Repository
@@ -258,7 +258,7 @@ jobs:
           echo "===== 组装完成 ====="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' "$BUILD_DIR/Makefile"
 
-      - name: Clone Clang 11.0.2
+      - name: Clone Clang r416183b (12.0.5)
         shell: bash
         run: |
           set -euxo pipefail
@@ -276,19 +276,21 @@ jobs:
           echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
           echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
 
-      - name: Clone GCC 4.9 (aarch64 + arm32)
+      - name: Clone GCC 9.3 (aarch64) + GCC 4.9 (arm32)
         shell: bash
         run: |
           set -euxo pipefail
           T="$GITHUB_WORKSPACE/toolchains"
           mkdir -p "$T"
-          git clone --depth=1 --single-branch --branch android-8.1.0_r68 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git \
-            "$T/gcc64"
+          # aarch64 用 GCC 9.3：它的 binutils 认 "2654435761U" 这种 C 后缀常量，
+          # GCC 4.9 的（2014 年）不认，会在 crypto/nanshan_encode_arm64.S 汇编失败
+          git clone --depth=1 --single-branch \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-9.3.git \
+            "$T/gcc93"
           git clone --depth=1 --single-branch --branch android-8.1.0_r68 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git \
             "$T/gcc32"
-          test -x "$T/gcc64/bin/aarch64-linux-android-gcc"
+          test -x "$T/gcc93/bin/aarch64-buildroot-linux-gnu-gcc"
           test -x "$T/gcc32/bin/arm-linux-androideabi-gcc"
 
       # ----------------------------------------------------------------------
@@ -306,6 +308,17 @@ jobs:
           git -C KernelSU-Next log -1 --format='%H %s'
           grep -n "kernelsu" drivers/Makefile
           grep -n "kernelsu" drivers/Kconfig
+
+      - name: Set Up Swap (LTO 链接很吃内存)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
 
       - name: Configure Kernel
         shell: bash
@@ -353,7 +366,7 @@ jobs:
           export ARCH=arm64 SUBARCH=arm64
           export CC=clang LD=ld.lld LLVM=1
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc64/bin/aarch64-linux-android-"
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
           make O=out olddefconfig
@@ -394,9 +407,8 @@ jobs:
           export ARCH=arm64 SUBARCH=arm64
           export CC=clang LD=ld.lld LLVM=1
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc64/bin/aarch64-linux-android-"
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
-          export KCFLAGS="-Wno-error -D__ANDROID_COMMON_KERNEL__"
 
           # LTO_CLANG + CFI_CLANG 的 vmlinux 链接很吃内存；OOM 就把 -j 调小
           TARGETS="Image.gz"
