@@ -88,7 +88,7 @@ on:
       build_dtbs:
         description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
         type: boolean
-        default: true
+        default: false
       source_branch:
         description: '源码分支。★必须和手机固件的 5.4.x 版本一致，否则卡二屏'
         type: string
@@ -404,7 +404,24 @@ jobs:
             TARGETS="$TARGETS dtbs"
           fi
 
-          make -j"$(nproc)" O=out $TARGETS
+          # 编译失败时，把真正的报错打成 GitHub 注解 —— 注解是公开可读的，
+          # 这样不用登录也能从 API 直接抓到失败原因
+          ann() {  # $1=标题  $2=文件
+            local msg
+            msg=$(sed -e 's/%/%25/g' -e 's/\r//g' "$2" | awk 'BEGIN{ORS=""} {print $0 "%0A"}')
+            echo "::error title=$1::${msg}"
+          }
+          if ! make -j"$(nproc)" O=out $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+            echo "========== 编译失败 =========="
+            grep -nE "error:|Error [0-9]|No rule to make|fatal error|undefined reference|recipe for target|Killed|FAILED" \
+              "$RUNNER_TEMP/build.log" | tail -25 > "$RUNNER_TEMP/errs.txt" || true
+            echo "----- 含 error 的行 -----"; cat "$RUNNER_TEMP/errs.txt"
+            echo "----- 日志最后 60 行 -----"; tail -60 "$RUNNER_TEMP/build.log"
+            ann "编译报错行" "$RUNNER_TEMP/errs.txt"
+            tail -c 1800 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/tail.txt"
+            ann "日志尾部" "$RUNNER_TEMP/tail.txt"
+            exit 1
+          fi
 
           test -s out/arch/arm64/boot/Image.gz
           ls -lh out/arch/arm64/boot/Image.gz
