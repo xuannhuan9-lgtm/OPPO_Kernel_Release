@@ -410,6 +410,10 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
+          # 这棵树自带 -Werror=implicit-function-declaration / -Werror=return-type 等
+          # （root_Makefile:492-495、1100），KCFLAGS 在 1115 行追加到最后，
+          # 所以 -Wno-error 能把它们降级成 warning —— 保留这个保险
+          export KCFLAGS="-Wno-error"
           # LTO_CLANG + CFI_CLANG 的 vmlinux 链接很吃内存；OOM 就把 -j 调小
           TARGETS="Image.gz"
           if [ "${{ inputs.build_dtbs }}" = "true" ]; then
