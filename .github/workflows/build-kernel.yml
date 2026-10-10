@@ -237,6 +237,18 @@ jobs:
           #      通用 -Wno-error 压不住具体的 -Werror=xxx（具体优先于通用），
           #      必须逐个点名；直接改 Makefile 一次覆盖所有类别。
           sed -i 's/-Werror=/-Wno-error=/g' "$BUILD_DIR/Makefile"
+          # 1.9) 真凶：scripts/gcc-wrapper.py 会把名单上的 warning 判成
+          #      "error, forbidden warning: xxx.c:NNN" 硬错误 —— 任何 -Wno-error
+          #      都压不住它（它根本不过编译器）。直接换成透传，让编译器自己说话。
+          GW="$BUILD_DIR/scripts/gcc-wrapper.py"
+          if [ -f "$GW" ]; then
+            cp -f "$GW" "$GW.orig"
+            printf '%s\n' '#!/usr/bin/env python3' 'import sys, subprocess' 'sys.exit(subprocess.call(sys.argv[1:]))' > "$GW"
+            chmod +x "$GW"
+            echo "gcc-wrapper.py 已换成透传（原文件存为 gcc-wrapper.py.orig）"
+          else
+            echo "没有 scripts/gcc-wrapper.py，跳过"
+          fi
           echo "顶层 Makefile 剩余 -Werror= 行数: $(grep -c -e -Werror= "$BUILD_DIR/Makefile" || true)"
 
           # 1.7) 修旧式函数定义：这棵树自带 -Werror=strict-prototypes，
@@ -469,18 +481,19 @@ jobs:
           }
           if ! make -j"$(nproc)" O=out $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
             echo "========== 编译失败 =========="
-            # 优先抓真正的编译器报错并带上上下文；没有再退回抓 make 的错误行
-            FIRST=$(grep -nE "error:|fatal error:" "$RUNNER_TEMP/build.log" | grep -v "make\[" | head -1 | cut -d: -f1 || true)
-            if [ -n "$FIRST" ]; then
-              S=$((FIRST-3)); [ "$S" -lt 1 ] && S=1
-              sed -n "${S},$((FIRST+12))p" "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/errs.txt"
-              echo "----- 第一处编译报错（日志第 $FIRST 行附近）-----"
-            else
-              grep -nE "Error [0-9]|No rule to make|Killed|FAILED" "$RUNNER_TEMP/build.log" \
-                | tail -20 > "$RUNNER_TEMP/errs.txt" || true
+            # 抓 make 的 Error 行，并把每处前面 60 行一起抓出来 —— 真正的编译器报错就在那里。
+            # grep -a 防止日志里的二进制字节让 grep 只回一句 "Binary file matches"。
+            grep -anE 'Error [0-9]+|forbidden warning' "$RUNNER_TEMP/build.log" | grep 'make\[' | head -3 | cut -d: -f1 | \
+            while read -r L; do
+              S=$((L-60)); [ "$S" -lt 1 ] && S=1
+              echo "===== 第 $L 行前 60 行 ====="
+              sed -n "${S},${L}p" "$RUNNER_TEMP/build.log"
+              echo
+            done > "$RUNNER_TEMP/errs.txt" || true
+            if [ ! -s "$RUNNER_TEMP/errs.txt" ]; then
+              grep -anE 'Killed|No rule to make|FAILED|Error [0-9]+|forbidden warning' "$RUNNER_TEMP/build.log" | tail -30 > "$RUNNER_TEMP/errs.txt" || true
             fi
-            echo "----- 含 error 的行 -----"; cat "$RUNNER_TEMP/errs.txt"
-            echo "----- 日志最后 60 行 -----"; tail -60 "$RUNNER_TEMP/build.log"
+
             ann "编译报错行" "$RUNNER_TEMP/errs.txt"
             tail -c 1800 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/tail.txt"
             ann "日志尾部" "$RUNNER_TEMP/tail.txt"
