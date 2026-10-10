@@ -438,6 +438,21 @@ jobs:
           scripts/config --file out/.config --disable KEXEC_SIG            || true
           scripts/config --file out/.config --disable KEXEC_SIG_FORCE      || true
           scripts/config --file out/.config --disable SYSTEM_BLACKLIST_KEYRING || true
+          # ===== 诊断：ION / DMA / ADSP 相关配置实际生效情况 =====
+          # 卡二屏真凶怀疑：ION 的 ioctl ABI 和 vendor HAL 对不上
+          {
+            echo "===== ION / DMA-BUF / ADSP 实际配置 ====="
+            grep -E '^CONFIG_(ION|MSM_ION|DMABUF|DMA_SHARED_BUFFER|DMA_BUF|QCOM_ION|ADSP|RPMSG|MSM_ADSPRPC|SLIMBUS|QCOM_SCM)' out/.config | sort
+            echo
+            echo "===== /dev/ion 与 dmabuf 相关节点驱动 ====="
+            grep -E '^CONFIG_(SYNTHETIC|DMABUF_HEAPS|DMABUF_HEAPS_SYSTEM|ION_SYSTEM_HEAP|ION_CARVEOUT_HEAP|ION_CHUNK_HEAP|ION_CMA_HEAP|ION_MSM_HEAP)' out/.config | sort
+          } > "$RUNNER_TEMP/ion.txt" 2>&1 || true
+          echo "=========== ION 配置 ==========="
+          cat "$RUNNER_TEMP/ion.txt"
+          # 同时用 notice 发出来，方便在 GitHub 注解里直接看
+          IONMSG=$(head -c 6000 "$RUNNER_TEMP/ion.txt" | tr '\n' ' ' | sed 's/%/%25/g')
+          echo "::notice title=ION与DMA配置::${IONMSG}" || true
+
           echo "===== 签名相关配置最终状态 ====="
           for k in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY KEXEC_SIG KEXEC_SIG_FORCE; do
             grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
