@@ -73,7 +73,7 @@ on:
       enable_ksu:
         description: '是否集成 KernelSU-Next（关掉可做对照构建，定位卡二屏）'
         type: boolean
-        default: false
+        default: true
       ksu_hook:
         description: 'KernelSU hook 模式（5.4 非 GKI 官方推荐 syscall_table）'
         type: choice
@@ -123,6 +123,8 @@ jobs:
       CLANG_REPO_BRANCH: android-14.0.0_r0.140
       CLANG_DIR_NAME: clang-r416183b
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: '1'
 
     steps:
       - name: Checkout Workflow Repository
@@ -358,7 +360,6 @@ jobs:
       # KernelSU-Next 官方非 GKI 集成：走 legacy 分支，不要手工改 fs/namespace.c
       # ----------------------------------------------------------------------
       - name: Integrate KernelSU-Next (legacy)
-        if: ${{ inputs.enable_ksu }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -367,8 +368,23 @@ jobs:
           test -d drivers/kernelsu
           echo "===== KernelSU-Next 版本 ====="
           git -C KernelSU-Next log -1 --format='%H %s'
-          grep -n "kernelsu" drivers/Makefile
-          grep -n "kernelsu" drivers/Kconfig
+          # KernelSU-Next 的 kernel/Kbuild 会在编译 drivers/kernelsu 时，判断
+          # fs/namespace.c 里有没有 path_umount，没有就现场注入一个。
+          # 本树确实没有 -> 注入确实发生了（锚点 ^static bool is_mnt_ns_file 存在）。
+          # 但注入的时机太晚：fs/ 属于 core-y，早就编译完 fs/namespace.o 了，
+          # 而 $(shell ...) 要等 make 进入 drivers/kernelsu/ 才求值 ——
+          # 符号来不及进目标文件，于是链接期 undefined symbol: path_umount。
+          # 5.4 树本来就该走 #else 的 ksys_umount 分支，强制关掉这个宏。
+          sed -i 's|^ccflags-y += -DKSU_HAS_PATH_UMOUNT|# ccflags-y += -DKSU_HAS_PATH_UMOUNT  # 强制关闭：本树无 path_umount|' \
+            KernelSU-Next/kernel/Kbuild
+          if grep -qE "^ccflags-y \+= -DKSU_HAS_PATH_UMOUNT" KernelSU-Next/kernel/Kbuild; then
+            echo "::error::KSU_HAS_PATH_UMOUNT 没能关掉，链接仍会失败"
+            exit 1
+          fi
+          echo "✓ KSU_HAS_PATH_UMOUNT 已关闭:"
+          grep -n "KSU_HAS_PATH_UMOUNT" KernelSU-Next/kernel/Kbuild || true
+          grep -n "kernelsu" drivers/Makefile || true
+          grep -n "kernelsu" drivers/Kconfig || true
 
       - name: Set Up Swap (LTO 链接很吃内存)
         shell: bash
@@ -411,6 +427,21 @@ jobs:
 
           # stock 是 MODULE_SIG_FORCE=y，自己编的模块没有官方签名，关掉
           scripts/config --file out/.config --disable MODULE_SIG_FORCE
+          # 内核签名相关的其余开关也要关：
+          #   MODULE_SIG_ALL=y  -> 编译时用本地生成的 key 给所有模块签名（没必要，还拖慢编译）
+          #   MODULE_SIG_KEY    -> 指向 OPPO 的签名私钥，本地没有
+          #   KEXEC_SIG*        -> 内核镜像签名校验
+          # 注意：CONFIG_MODULE_SIG 本身必须保持 =y ！它会改变 struct module 的布局，
+          #       关掉的话手机里那 7 个原厂 .ko 就跟这个内核 ABI 不兼容了。
+          scripts/config --file out/.config --disable MODULE_SIG_ALL
+          scripts/config --file out/.config --set-str MODULE_SIG_KEY ""
+          scripts/config --file out/.config --disable KEXEC_SIG            || true
+          scripts/config --file out/.config --disable KEXEC_SIG_FORCE      || true
+          scripts/config --file out/.config --disable SYSTEM_BLACKLIST_KEYRING || true
+          echo "===== 签名相关配置最终状态 ====="
+          for k in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY KEXEC_SIG KEXEC_SIG_FORCE; do
+            grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
+          done
 
           # 钉死内核版本串：/vendor 里 stock 的 .ko 靠 vermagic 校验，
           # 版本串变了它们就全部加载失败
@@ -497,21 +528,33 @@ jobs:
           export PATH="$HOME/ccache-bin:$PATH"
           ccache -z || true
           echo "ccache: $(ccache --version | head -1)"
-          if ! make -j"$(nproc)" O=out $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+          if ! make -j"$(nproc)" O=out DISABLE_WRAPPER=1 $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
             echo "========== 编译失败 =========="
             # 抓 make 的 Error 行，并把每处前面 60 行一起抓出来 —— 真正的编译器报错就在那里。
             # grep -a 防止日志里的二进制字节让 grep 只回一句 "Binary file matches"。
-            grep -anE 'Error [0-9]+|forbidden warning' "$RUNNER_TEMP/build.log" | grep 'make\[' | head -3 | cut -d: -f1 | \
+          # 第一优先：直接抓真正的报错文本。并行编译（-j4）下 make 的 "Error N" 行
+          # 和真正的编译错误不在同一段输出里，所以先按报错文本抓。
+          grep -anE 'ld\.lld: error|ld: error|undefined symbol|fatal error:|: error:|forbidden warning' \
+            "$RUNNER_TEMP/build.log" | head -8 > "$RUNNER_TEMP/errs.txt" || true
+          # 把报错行前后的上下文一起带上
+          if [ -s "$RUNNER_TEMP/errs.txt" ]; then
+            cut -d: -f1 "$RUNNER_TEMP/errs.txt" | head -2 | while read -r L; do
+              S=$((L-25)); [ "$S" -lt 1 ] && S=1
+              echo "===== 第 $L 行上下文 ====="
+              sed -n "${S},$((L+5))p" "$RUNNER_TEMP/build.log"
+              echo
+            done >> "$RUNNER_TEMP/errs.txt" || true
+          fi
+          # 第二优先：退回 make 的 Error 行
+          if [ ! -s "$RUNNER_TEMP/errs.txt" ]; then
+            grep -anE 'Error [0-9]+' "$RUNNER_TEMP/build.log" | grep 'make\[' | head -3 | cut -d: -f1 | \
             while read -r L; do
               S=$((L-60)); [ "$S" -lt 1 ] && S=1
               echo "===== 第 $L 行前 60 行 ====="
               sed -n "${S},${L}p" "$RUNNER_TEMP/build.log"
               echo
             done > "$RUNNER_TEMP/errs.txt" || true
-            if [ ! -s "$RUNNER_TEMP/errs.txt" ]; then
-              grep -anE 'Killed|No rule to make|FAILED|Error [0-9]+|forbidden warning' "$RUNNER_TEMP/build.log" | tail -30 > "$RUNNER_TEMP/errs.txt" || true
-            fi
-
+          fi
             ann "编译报错行" "$RUNNER_TEMP/errs.txt"
             tail -c 1800 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/tail.txt"
             ann "日志尾部" "$RUNNER_TEMP/tail.txt"
