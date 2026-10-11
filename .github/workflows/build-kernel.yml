@@ -21,11 +21,43 @@ name: "[A] OPPO K10x k10x_5g (5.4.233->254 + KernelSU-Next)"
 #     ksu_can_umount 让 Kbuild 的 grep -Eq "^static int can_umount" 失配，
 #     于是它又插一个没人用的 can_umount。
 #
-#  2. 【修】KernelSU hook 模式。5.4 必须用 KSU_SYSCALL_TABLE_HOOK。
-#     Kconfig 原文：KSU_KPROBES_HOOK "should not be used on kernel below 5.10"。
-#     旧版写的 CONFIG_KSU_KPROBE_HOOKS 这个符号根本不存在（真名 KSU_KPROBES_HOOK），
-#     而因为 stock config 里 KPROBES=y，choice 的默认值正好落在
-#     KSU_KPROBES_HOOK —— 也就是官方明确说「5.10 以下别用」的那一档。
+#  2. 【修·2026-10-11 重写】KernelSU hook 模式 —— 必须是 KSU_KPROBES_HOOK。
+#     之前这里写着「5.4 必须用 KSU_SYSCALL_TABLE_HOOK」，是错的，直接导致
+#     面具首页显示「未集成」。证据链：
+#
+#       a) 面具的 JNI（manager/app/src/main/cpp/ksu.cc）判定 is_manager()：
+#            ① 先 ioctl(fd, KSU_IOCTL_GET_INFO)  —— 需要名为 [ksu_driver] 的 fd
+#            ② 失败则 legacy_get_info()        —— 走 prctl(0xDEADBEEF,2,...)
+#          而 ② 在 KernelSU-Next v3.x 里已是死代码：legacy 分支全树 107 个
+#          条目里，0xDEADBEEF 只出现在 uapi/supercall.h 的一个 #define，
+#          内核侧没有任何 prctl 处理器。
+#
+#       b) 那个 [ksu_driver] fd 由 kernel/supercall/supercall.c 的
+#          ksu_install_fd() 用 anon_inode_getfile("[ksu_driver]", ...) 创建，
+#          而它的唯一触发入口是 ksu_handle_sys_reboot()：
+#              reboot(0xDEADBEEF /*KSU_INSTALL_MAGIC1*/,
+#                     KSU_INSTALL_MAGIC2, 0, &fd)
+#
+#       c) ksu_handle_sys_reboot 只被一个 kprobe 调用：
+#              supercall.c L293-309  #ifdef KSU_KPROBES_HOOK
+#                                    static struct kprobe reboot_kp = {
+#                                        .symbol_name = REBOOT_SYMBOL, ...};
+#              supercall.c L318-325  #ifdef KSU_KPROBES_HOOK
+#                                    register_kprobe(&reboot_kp);
+#          —— 两处都在 KSU_KPROBES_HOOK 的 #ifdef 里面。
+#
+#       d) KSU_SYSCALL_TABLE_HOOK 的钩子表（hook/syscall_table_hook.c L218-234）
+#          总共只挂 4 个：execve / execveat / faccessat / newfstatat，
+#          没有 __NR_reboot，也没有 prctl。
+#
+#     结论：syscall_table 模式下 reboot 系统调用完全没被挂钩 ->
+#           面具永远拿不到驱动 fd -> is_manager()=false -> 首页「未集成」。
+#     换成 kprobes 模式，register_kprobe(&reboot_kp) 才会执行，面具立刻能认。
+#
+#     另外 Kconfig 里 choice 的默认值本来就是 KSU_KPROBES_HOOK，legacy 分支
+#     本来就是给老内核用的，官方那句 "should not be used on kernel below 5.10"
+#     针对的是 tracepoint ABI 差异，而本树 CONFIG_HAVE_SYSCALL_TRACEPOINTS=y，
+#     实际可用。所以 kprobes 才是这棵树的正解。
 #
 #  3. 【加】make dtbs。旧版只 make Image.gz，arch/arm64/boot/dts/Makefile 里
 #     vendor 是条件包含（wildcard 到 vendor/Makefile 才加），默认目标又不含
@@ -75,12 +107,29 @@ on:
         type: boolean
         default: true
       ksu_hook:
-        description: 'KernelSU hook 模式（5.4 非 GKI 官方推荐 syscall_table）'
+        description: 'KernelSU hook 模式。★必须用 kprobes★ —— syscall_table 模式不挂 reboot 系统调用，面具拿不到驱动 fd，会一直显示「未集成」'
         type: choice
         options:
-          - syscall_table
           - kprobes
-        default: syscall_table
+          - syscall_table
+        default: kprobes
+      # 14. module_sig：模块签名校验开关。
+      #     实测本树 include/linux/module.h 里 struct module 的 sig_ok 字段是
+      #     【无条件存在】的（原厂注释：preserve ABI compatibility between kernels
+      #     without module signing enabled and signed modules），所以关掉 MODULE_SIG
+      #     不改变任何结构体布局，对原厂 .ko 安全。
+      #     ★ 为什么建议 off：kernel/module.c 的 module_sig_check() 里，
+      #       -ENODATA（无签名）/ -ENOPKG / -ENOKEY 在非强制时被豁免，但
+      #       default: return err;  —— 签名验证失败(-EKEYREJECTED)即使没开强制
+      #       也会【直接拒绝加载】。原厂 .ko 目前走 -ENODATA 豁免所以能加载，
+      #       但整个关掉 MODULE_SIG 后这条路径根本不存在，更稳。
+      module_sig:
+        description: '模块签名校验。off=彻底关掉（MODULE_SIG=n，module_sig_check 直接 return 0，推荐）；keep=保留校验代码但不强制（MODULE_SIG=y + FORCE=n，已验证能开机）'
+        type: choice
+        options:
+          - 'off'
+          - keep
+        default: 'off'
       kernel_release_suffix:
         description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
         type: string
@@ -133,6 +182,51 @@ on:
         default: ''
       devicetree_commit:
         description: '（可选）devicetree 仓库要构建的确切 commit'
+        type: string
+        default: ''
+
+      # ── 面具识别（这两个是「面具显示未集成」的正解）──
+      #
+      # 12. ksu_manager_package：KernelSU-Next 的 kernel/Kbuild 里，is_manager_apk()
+      #     有两条判定路径：
+      #       (a) 定义了 KSU_MANAGER_PACKAGE  -> 直接比包名，不扫 /data/app（稳）
+      #       (b) 没定义                      -> 扫 /data/app + 校验硬编码签名哈希
+      #                                          KSU_NEXT_MANAGER_HASH=79e59011...
+      #     legacy 分支 2026-10-07 的提交 8869bd768d66 "pin manager package name"
+      #     刚把 (b) 整段重写过（throne_tracker.c +148/-85，把
+      #     get_pkg_from_apk_path 换成 get_pkg_from_apk_dir_path）。
+      #     在 ColorOS 14 的 /data/app/~~hash==/pkg-hash==/ 布局下这段扫描
+      #     可能解析失败 -> 面具永远不被 crown -> Natives.isManager=false
+      #     -> 面具首页显示「未集成」（就是 zh-rCN 里的 home_failure）。
+      #     填了这个包名，内核就完全跳过扫描，spoofed 版也能正常认。
+      #     查包名：adb shell pm list packages | grep -i -E 'ksu|rifsxd|kernel'
+      ksu_manager_package:
+        description: 'KernelSU-Next 面具包名。★spoofed 版包名是构建时随机生成的（manager/spoof 用 /dev/urandom 造三段 6 字母单词替换 com.rifsxd.ksunext），每版都不同，必须用 adb shell pm list packages 实查★。官方版固定 com.rifsxd.ksunext。填了内核只比包名、跳过 /data/app 扫描与签名校验；留空=走扫描+签名校验（两个变体签名相同，都能过）'
+        type: string
+        default: ''
+      #     ★ spoofed 版的包名是【随机】的：manager/spoof 用 /dev/urandom 生成
+      #       三段 6 字母小写单词替换 com.rifsxd.ksunext，每个 release 都不同，
+      #       没法写死。要填这个输入项必须先用 adb 查手机上实际装的包名。
+      #       官方（非 spoofed）版固定是 com.rifsxd.ksunext。
+      #     ★ spoof 脚本【只改包名、不改签名】，两个变体同一个密钥，所以内核里
+      #       硬编码的 KSU_NEXT_MANAGER_HASH=79e59011... 对两者都成立 ——
+      #       签名校验不是问题，留空也能认。填包名主要是为了绕开 ColorOS 14
+      #       那个脆弱的 /data/app 路径解析（throne_tracker.c 2026-10-07 重写过）。
+      #
+      # 13. ksu_version_override：内核上报的 KSU 版本号默认是
+      #     30000 + git提交数 + 289（legacy 分支 2026-10-07 = 3017 个提交 = 33306）。
+      #     面具自带 MINIMAL_SUPPORTED_KERNEL=33188 的下限。但注意：v3.4.1 的 57 个
+      #     Kotlin 文件全扫过，这个常量【只有声明、没有任何使用点】。
+      #     面具判定「全功能」的唯一依据是 Natives.kt L175-177：
+      #         fun isFullFeatured() = isManager &&
+      #             kernelUAPIVersion == managerUAPIVersion && rootAvailable()
+      #     而 kernelUAPIVersion 和 managerUAPIVersion 两边都是 5
+      #     （uapi/supercall.h L13，legacy 分支与 v3.4.1 标签完全一致），
+      #     所以只要 isManager 为真就是全功能。
+      #     ★ 内核 33306 vs 面具 33333 这 27 的差值【没有任何地方检查】。
+      #     真要改就填 33333，纯属心理安慰。留空=自动。
+      ksu_version_override:
+        description: '强制内核上报的 KernelSU 版本号（留空=按 git 提交数自动算）。面具 v3.4.1=33333，v3.4.0=33294'
         type: string
         default: ''
 
@@ -634,7 +728,18 @@ jobs:
             scripts/config --file out/.config --enable KSU
 
             if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              # ★ KSU_KPROBES_HOOK 靠 sys_enter/sys_exit 两个 tracepoint 抓系统调用。
+              #   这两个 tracepoint 定义在 include/trace/events/syscalls.h，
+              #   而该头文件只在 kernel/trace/trace_syscalls.c 里被 include，
+              #   那个文件又是 CONFIG_FTRACE_SYSCALLS 才编译。
+              #   本机 stock config 里它是 "not set" —— 必须补上，
+              #   否则 trace_sys_enter() 不存在，KSU 编不过。
+              #   注意：这只是 tracing 功能，不影响任何结构体布局 / ABI，
+              #   和防卡二屏那套（MODVERSIONS=n + vermagic）互不干扰。
               scripts/config --file out/.config \
+                --enable  FTRACE \
+                --enable  TRACEPOINTS \
+                --enable  FTRACE_SYSCALLS \
                 --disable KSU_MANUAL_HOOK \
                 --enable  KSU_KPROBES_HOOK \
                 --disable KSU_SYSCALL_TABLE_HOOK
@@ -647,29 +752,26 @@ jobs:
           fi
 
           # ★★★ 卡二屏真凶 ★★★
-          # 手机 /vendor/lib/modules/ 里的 .ko 是 OPPO 用原厂内核编的，原厂开了
-          # CONFIG_MODVERSIONS=y，每个符号都带 CRC 校验值。我们的内核也开 MODVERSIONS，
-          # 但 CRC 和原厂不一致 -> 加载时全部报：
+          # 手机 /vendor/lib/modules/ 里的 .ko 是 OPPO 用原厂内核编的。原厂开了
+          # CONFIG_MODVERSIONS=y，每个导出符号都带 CRC 校验值；我们编出来的内核 CRC
+          # 和原厂算的不一样，于是加载时全部报：
           #     "<模块名>: disagrees about version of symbol module_layout"
-          # dmesg 实测有 200+ 个模块这样失败，其中 msm_glink_ssr / qcom_glink_spss /
-          # glink_pkt / rpmsg_char 全部加载失败 -> ADSP 的 GLINK 传输起不来 ->
+          # dmesg 实测 200+ 个模块这样失败，其中 msm_glink_ssr / qcom_glink_spss /
+          # glink_pkt / rpmsg_char 全挂 -> ADSP 的 GLINK 传输起不来 ->
           # adsp 的 rpmsg 通道从来没被创建 -> me->channel[0].rpdev == NULL ->
-          # adsprpc VERIFY 失败(-ENODEV) -> 所有 ADSP HAL abort() -> 卡二屏。
-          # 关掉 MODVERSIONS 后内核不再校验符号 CRC，只校验 vermagic；vermagic 已经
-          # 通过 LOCALVERSION 精确对齐成 5.4.254-qgki-g6818c821e42d，所以原厂 .ko 能加载。
-          # ★★★ 卡二屏真凶：原厂 .ko 的符号 CRC 和我们算的不一致 ★★★
-          # dmesg 实测 200+ 个模块全报 "disagrees about version of symbol module_layout"，
-          # 其中 msm_glink_ssr / qcom_glink_spss / glink_pkt / rpmsg_char 加载失败
-          # -> ADSP 的 GLINK 传输起不来 -> adsp 的 rpmsg 通道从未创建
-          # -> me->channel[0].rpdev == NULL -> adsprpc VERIFY 失败(-ENODEV)
-          # -> 所有 ADSP HAL abort() -> system_server 起不来 -> 卡二屏。
+          # adsprpc VERIFY 失败(-ENODEV) -> 所有 ADSP HAL abort() ->
+          # system_server 起不来 -> 卡二屏。
           #
-          # 关掉 MODVERSIONS 后 check_version() / check_modstruct_version() 都变成
-          # "static inline ... { return 1; }"，CRC 校验整体跳过。
+          # 修法：关掉 MODVERSIONS。此时 check_version() / check_modstruct_version()
+          # 都退化成 "static inline ... { return 1; }"，CRC 校验整体跳过，内核只校验
+          # vermagic；vermagic 已通过 LOCALVERSION 精确对齐成
+          # 5.4.254-qgki-g6818c821e42d，所以原厂 .ko 能正常加载。
           #
-          # 但关掉后 vermagic 会少 "modversions" 一词，而 MODVERSIONS=n 时 same_magic()
-          # 是整串 strcmp（不做"跳过版本串"处理）-> bad vermagic -> -ENOEXEC。
-          # 所以必须同时给 include/linux/vermagic.h 打补丁把那个词补回来（见下一步）。
+          # 副作用：关掉后 vermagic 会少 "modversions" 一词，而 MODVERSIONS=n 时
+          # same_magic() 是整串 strcmp（不做"跳过版本串"处理）-> bad vermagic ->
+          # -ENOEXEC。所以必须同时给 include/linux/vermagic.h 打补丁把那个词补回来
+          # （见第 16 步 Patch vermagic.h）。
+          # 这两件事必须成对出现：只关 MODVERSIONS 会 bad vermagic，只打补丁没用。
           scripts/config --file out/.config --disable MODVERSIONS
           # stock 是 MODULE_SIG_FORCE=y，自己编的模块没有官方签名，关掉
           scripts/config --file out/.config --disable MODULE_SIG_FORCE
@@ -677,8 +779,26 @@ jobs:
           #   MODULE_SIG_ALL=y  -> 编译时用本地生成的 key 给所有模块签名（没必要，还拖慢编译）
           #   MODULE_SIG_KEY    -> 指向 OPPO 的签名私钥，本地没有
           #   KEXEC_SIG*        -> 内核镜像签名校验
-          # 注意：CONFIG_MODULE_SIG 本身必须保持 =y ！它会改变 struct module 的布局，
-          #       关掉的话手机里那 7 个原厂 .ko 就跟这个内核 ABI 不兼容了。
+          #
+          # ★ 关于 CONFIG_MODULE_SIG 本身（2026-10-11 更正）：
+          #   旧版这里写着「必须保持 =y，它会改变 struct module 布局」—— 这是【错的】。
+          #   实测本树 include/linux/module.h，sig_ok 是无条件字段：
+          #       /* preserve ABI compatibility between kernels without module
+          #        * signing enabled and signed modules. */
+          #       bool sig_ok;
+          #   没有 #ifdef 包裹，所以开不开 MODULE_SIG 都不影响结构体布局。
+          #   而且关掉更安全：kernel/module.c 的 module_sig_check() 里
+          #       default: return err;   /* All other errors are fatal, including nomem,
+          #                               * unparseable signatures and signature check
+          #                               * failures - even if signatures aren't required. */
+          #   签名验证失败(-EKEYREJECTED)即使 FORCE=n 也会直接拒绝加载。
+          #   关掉 MODULE_SIG 后该函数整体变成 return 0，这条路径彻底消失。
+          if [ "${{ inputs.module_sig }}" = "off" ]; then
+            scripts/config --file out/.config --disable MODULE_SIG
+            echo "  → MODULE_SIG=n（module_sig_check 直接返回 0，签名路径完全不存在）"
+          else
+            echo "  → MODULE_SIG 保持 =y 但不强制（FORCE=n）"
+          fi
           scripts/config --file out/.config --disable MODULE_SIG_ALL
           scripts/config --file out/.config --set-str MODULE_SIG_KEY ""
           scripts/config --file out/.config --disable KEXEC_SIG            || true
@@ -771,6 +891,13 @@ jobs:
             echo "::error::CONFIG_MODULE_SIG_FORCE 还是 y！原厂 .ko 没有我们的签名"; exit 1
           fi
           echo "  OK CONFIG_MODULE_SIG_FORCE 已关闭"
+          # module_sig=off 时，MODULE_SIG 本身也必须真的关掉
+          if [ "${{ inputs.module_sig }}" = "off" ]; then
+            if grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
+              echo "::error::module_sig=off 但 CONFIG_MODULE_SIG 还是 y！签名路径没关掉"; exit 1
+            fi
+            echo "  OK CONFIG_MODULE_SIG=n（module_sig_check 整体变成 return 0）"
+          fi
           if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
             echo "::error::LOCALVERSION_AUTO 还是 y，vermagic 会多出 -g<hash>"; exit 1
           fi
@@ -858,21 +985,55 @@ jobs:
           if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
             echo "::error::olddefconfig 之后 CONFIG_LOCALVERSION_AUTO 又变回 y！vermagic 会多出 -g<hash>"; exit 1
           fi
-          echo "  OK MODVERSIONS=n / MODULE_SIG_FORCE=n / LOCALVERSION_AUTO=n 在 olddefconfig 之后仍成立"
+          if [ "${{ inputs.module_sig }}" = "off" ] && grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_MODULE_SIG 又变回 y！"; exit 1
+          fi
+          echo "  OK MODVERSIONS=n / MODULE_SIG_FORCE=n / MODULE_SIG=n / LOCALVERSION_AUTO=n 在 olddefconfig 之后仍成立"
           # KernelSU-Next：CONFIG_KSU 是 tristate + default y，但要确认没被裁成 =m 或被丢
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
-            for k in KSU KSU_SYSCALL_TABLE_HOOK; do
+            # 期望的 hook 符号跟着 ksu_hook 走：kprobes -> KSU_KPROBES_HOOK，
+            # syscall_table -> KSU_SYSCALL_TABLE_HOOK。写死其中一个会误报。
+            if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              KSU_HOOK_SYM=KSU_KPROBES_HOOK
+            else
+              KSU_HOOK_SYM=KSU_SYSCALL_TABLE_HOOK
+            fi
+            for k in KSU "$KSU_HOOK_SYM"; do
               if ! grep -q "^CONFIG_${k}=y" out/.config; then
                 echo "::error::olddefconfig 之后 CONFIG_${k} 不是 y！KernelSU-Next 没编进去"; exit 1
               fi
             done
-            if grep -q "^CONFIG_KSU_KPROBES_HOOK=y" out/.config; then
-              echo "::error::KSU_KPROBES_HOOK 被打开了（我们选的是 syscall_table 模式）"; exit 1
+            # 这三个开关一旦被打开，面具必定认不到内核：
+            #   KSU_MANUAL_HOOK      =y -> choice 块整段不可用，两个动态钩子全丢
+            #   KSU_DISABLE_MANAGER  =y -> 内核直接不做面具识别
+            #   KSU_DISABLE_POLICY   =y -> 每个 App 的 root 配置失效
+            for k in KSU_MANUAL_HOOK KSU_DISABLE_MANAGER KSU_DISABLE_POLICY; do
+              if grep -q "^CONFIG_${k}=y" out/.config; then
+                echo "::error::olddefconfig 之后 CONFIG_${k}=y！这会让面具显示「未集成」"; exit 1
+              fi
+            done
+            echo "  OK KernelSU: $KSU_HOOK_SYM=y / KSU=y / MANUAL_HOOK / DISABLE_MANAGER / DISABLE_POLICY 均未开启"
+            # kprobes 模式还要确认 syscall tracepoint 真的在（KSU 靠它抓系统调用）
+            if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              if ! grep -q "^CONFIG_FTRACE_SYSCALLS=y" out/.config; then
+                echo "::error::kprobes 模式但 CONFIG_FTRACE_SYSCALLS 不是 y！sys_enter tracepoint 不存在，KSU 编不过"; exit 1
+              fi
+              echo "  OK FTRACE_SYSCALLS=y（sys_enter/sys_exit tracepoint 可用）"
+            fi
+            # 另一个 hook 符号必须是 n：两个同时 =y 时 Kbuild L170-172 会
+            # $(error -- KernelSU-Next: No hooks were defined...)，直接编译失败。
+            if [ "$KSU_HOOK_SYM" = "KSU_KPROBES_HOOK" ]; then
+              OTHER_HOOK=KSU_SYSCALL_TABLE_HOOK
+            else
+              OTHER_HOOK=KSU_KPROBES_HOOK
+            fi
+            if grep -q "^CONFIG_${OTHER_HOOK}=y" out/.config; then
+              echo "::error::${OTHER_HOOK}=y 与 ${KSU_HOOK_SYM}=y 同时打开，Kbuild 会报 No hooks were defined"; exit 1
             fi
             if grep -qE '^ccflags-y \+= -DKSU_HAS_PATH_UMOUNT' "$BUILD_DIR/KernelSU-Next/kernel/Kbuild"; then
               echo "::error::KSU_HAS_PATH_UMOUNT 没关掉，链接期会 undefined symbol: path_umount"; exit 1
             fi
-            echo "  OK KernelSU-Next: KSU=y + SYSCALL_TABLE_HOOK=y + KPROBES_HOOK=n + PATH_UMOUNT 已关"
+            echo "  OK KernelSU-Next: KSU=y + ${KSU_HOOK_SYM}=y + ${OTHER_HOOK}=n + PATH_UMOUNT 已关"
           else
             echo "  （enable_ksu=false，跳过 KernelSU 核对）"
           fi
@@ -955,6 +1116,24 @@ jobs:
           export KCFLAGS="-Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-type -Wno-error=incompatible-pointer-types"
           # LTO_CLANG + CFI_CLANG 的 vmlinux 链接很吃内存；OOM 就把 -j 调小
           TARGETS="Image.gz Image"
+
+          # ── KernelSU-Next 面具识别开关 ──
+          # KSU_MANAGER_PACKAGE 必须在 make 命令行上传（不能放 env）：
+          # 空值的环境变量在 make 里也算「已定义」，会写出
+          # -DKSU_MANAGER_PACKAGE=\"\" 这种空包名，反而认不到任何面具。
+          EXTRA_KSU_VARS=""
+          if [ -n "${{ inputs.ksu_manager_package }}" ]; then
+            EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_MANAGER_PACKAGE=${{ inputs.ksu_manager_package }}"
+            echo "::notice title=KernelSU 面具包名::${{ inputs.ksu_manager_package }}（按包名直接认，跳过 /data/app 扫描）"
+          else
+            echo "::notice title=KernelSU 面具包名::（未指定，走扫描+签名校验；若面具显示未集成就填上）"
+          fi
+          if [ -n "${{ inputs.ksu_version_override }}" ]; then
+            EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_VERSION_OVERRIDE=${{ inputs.ksu_version_override }}"
+            echo "::notice title=KernelSU 版本号::强制上报 ${{ inputs.ksu_version_override }}"
+          else
+            echo "::notice title=KernelSU 版本号::（自动，按 git 提交数算）"
+          fi
           if [ "${{ inputs.build_dtbs }}" = "true" ]; then
             TARGETS="$TARGETS dtbs"
           fi
@@ -978,7 +1157,7 @@ jobs:
           echo "PATH 前两项: $(echo "$PATH" | cut -d: -f1,2)"
           echo "clang 解析到: $(command -v clang)"
           echo "ccache 解析到: $(command -v ccache)"
-          if ! make -j"$(nproc)" O=out DISABLE_WRAPPER=1 $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+          if ! make -j"$(nproc)" O=out DISABLE_WRAPPER=1 $EXTRA_KSU_VARS $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
             echo "========== 编译失败 =========="
             # 抓 make 的 Error 行，并把每处前面 60 行一起抓出来 —— 真正的编译器报错就在那里。
             # grep -a 防止日志里的二进制字节让 grep 只回一句 "Binary file matches"。
@@ -1009,6 +1188,33 @@ jobs:
             tail -c 1800 "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/tail.txt"
             ann "日志尾部" "$RUNNER_TEMP/tail.txt"
             exit 1
+          fi
+
+          # ★★★ KernelSU 版本号自检 ★★★
+          # 内核上报的 KSU_VERSION 不是写死的，而是从 KernelSU-Next 仓库的
+          # git 提交数算出来的（kernel/Kbuild L81/L90）：
+          #     KSU_VERSION = 30000 + $(git rev-list --count HEAD) + 289
+          # 完整克隆时 = 30000 + 3017 + 289 = 33306。
+          # 但 Kbuild L92-97 有个退化分支：拿不到 git 版本就
+          #     KSU_VERSION_FALLBACK := 1
+          # 于是内核上报 1 —— 远低于面具的 MINIMAL_SUPPORTED_KERNEL=33188，
+          # 面具那边任何按版本做的判断都会失败。
+          # 触发条件：浅克隆（--depth=1，rev-list 只数到 1）、.git 被删、
+          # 或者 KernelSU-Next 被当普通目录拷进来而不是 clone。
+          # setup.sh 用的是完整 clone，正常不会中招，但这里必须兜住。
+          if [ "${{ inputs.enable_ksu }}" = "true" ]; then
+            KV="$(grep -aE '^-- KernelSU-Next version: [0-9]+' "$RUNNER_TEMP/build.log" | tail -1 | grep -oE '[0-9]+$' || true)"
+            KCNT="$(git -C "$BUILD_DIR/KernelSU-Next" rev-list --count HEAD 2>/dev/null || echo '取不到')"
+            echo "  KernelSU-Next 仓库提交数 = $KCNT（完整克隆应为 3017）"
+            if [ -z "$KV" ]; then
+              echo "::warning title=KernelSU 版本号::编译日志里没有 '-- KernelSU-Next version:' 行，KSU 可能根本没编进去"
+            elif [ "$KV" -lt 33188 ]; then
+              echo "::error::KernelSU 版本号只有 $KV，低于面具要求的 33188！多半是 KernelSU-Next 不是完整 git 仓库（浅克隆或 .git 丢失），rev-list --count 退化成了 1"
+              grep -aE 'KSU_GIT_VERSION|version fallback|rev-list|KernelSU-Next version' "$RUNNER_TEMP/build.log" | head -5 || true
+              exit 1
+            else
+              echo "::notice title=KernelSU 版本号::$KV（面具 v3.4.1 要求 ≥33188，通过）| KernelSU-Next 提交数 $KCNT"
+            fi
           fi
 
           # ccache 到底有没有生效？把它自己说的数字打出来
@@ -1124,6 +1330,40 @@ jobs:
             VM4="$(grep -E '^CONFIG_LOCALVERSION(=|_AUTO)' "$CFGF" 2>/dev/null | tr '\n' ' ')"
             echo "::notice title=vermagic 三件套::vermagic.h 里 #ifdef CONFIG_MODVERSIONS 出现 $VM1 次（必须 0）| $VM2 | $VM3 | $VM4"
           fi
+
+          # 3.5) ★ KernelSU 到底编进去没有 —— 这一段是「面具显示未集成」的定位依据
+          #
+          # KernelSU-Next 的 kernel/Kbuild 会往编译日志打两行铁证：
+          #   -- KernelSU-Next version: 33306          (30000 + git提交数 + 289)
+          #   -- KernelSU-Next: Hook mode: Syscall table patching
+          # 只要这两行在 build.log 里，就证明 drivers/kernelsu 真的被编译了。
+          # 如果这里看不到，说明 CONFIG_KSU 没进最终 .config（或被 olddefconfig 丢了）。
+          KSUVER="$(grep -aE 'KernelSU-Next version' "$LOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
+          KSUHOOK="$(grep -aE 'KernelSU-Next: Hook mode' "$LOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
+          KSUMGR="$(grep -aE 'Manager (package name|signature)' "$LOG" 2>/dev/null | tail -2 | tr '\n' ' ')"
+          KSUOBJ="$(grep -acE 'drivers/kernelsu|KernelSU-Next/kernel' "$LOG" 2>/dev/null || echo 0)"
+          echo "::notice title=KernelSU 编译证据::版本=[${KSUVER:-（日志里没有！说明 KSU 没编）}] 钩子=[${KSUHOOK:-（无）}] 面具=[${KSUMGR:-（无，走扫描+签名）}] 相关编译行=${KSUOBJ}"
+
+          echo "::notice title=KernelSU 最终配置::$(grep -E '^CONFIG_(KSU|KSU_)' "$CFGF" 2>/dev/null | tr '\n' ' | ' | cut -c1-1400)"
+
+          # 这四项是「面具能不能认到内核」的直接决定因素：
+          #   KSU                     必须 y  —— 编进内核
+          #   KSU_SYSCALL_TABLE_HOOK  必须 y  —— 5.4 非 GKI 唯一可用的钩子
+          #   KSU_MANUAL_HOOK         必须 n  —— 否则 choice 块整个不可用
+          #   KSU_DISABLE_MANAGER     必须 n  —— 否则面具永远不被认
+          for KV in KSU KSU_SYSCALL_TABLE_HOOK KSU_MANUAL_HOOK KSU_KPROBES_HOOK KSU_DISABLE_MANAGER; do
+            V="$(grep -E "^CONFIG_${KV}=" "$CFGF" 2>/dev/null || echo "CONFIG_${KV}=（未设置）")"
+            echo "  $V"
+          done > /tmp/ksu4.txt 2>&1 || true
+          echo "::notice title=KernelSU 四项关键开关::$(tr '\n' ' | ' < /tmp/ksu4.txt)"
+
+          # drivers/kernelsu 软链 + 源文件是否就位（KSU 没编多半是这里断了）
+          if [ -L "$BUILD_DIR/drivers/kernelsu" ]; then
+            echo "::notice title=drivers/kernelsu::软链 -> $(readlink "$BUILD_DIR/drivers/kernelsu") | Kbuild $([ -f "$BUILD_DIR/KernelSU-Next/kernel/Kbuild" ] && echo 存在 || echo 缺失)"
+          else
+            echo "::notice title=drivers/kernelsu::（不是软链！KSU 编不进去）"
+          fi
+          echo "::notice title=drivers/Makefile 里的 kernelsu::$(grep -n 'kernelsu' "$BUILD_DIR/drivers/Makefile" 2>/dev/null | tr '\n' ' ' || echo '(无！)')"
 
           # 4) 最终产物
           echo "::notice title=产物::$(ls -la "$BUILD_DIR/out/arch/arm64/boot/Image"* 2>/dev/null || echo '(无)')"
