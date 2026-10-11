@@ -1,0 +1,397 @@
+# 探针2：job 级 + 前 12 个步骤
+# 点 Run workflow：跑出 1 个 job = 这段没问题；startup_failure = 这段有问题
+on:
+  workflow_dispatch:
+    inputs:
+      enable_ksu:
+        description: '是否集成 KernelSU-Next（官方 legacy 流程）。默认 true。注意：FolkPatch/APatch 也是内核级 root，与 KSU 同开会冲突，用它们取 root 读日志时请设 false'
+        type: boolean
+        default: true
+      ksu_hook:
+        description: 'KernelSU hook 模式。★必须用 kprobes★ —— syscall_table 模式不挂 reboot 系统调用，面具拿不到驱动 fd，会一直显示「未集成」'
+        type: choice
+        options:
+          - kprobes
+          - syscall_table
+        default: kprobes
+      module_sig:
+        description: '模块签名校验。off=彻底关掉（MODULE_SIG=n，module_sig_check 直接 return 0，推荐）；keep=保留校验代码但不强制（MODULE_SIG=y + FORCE=n，已验证能开机）'
+        type: choice
+        options:
+          - 'off'
+          - keep
+        default: 'off'
+      kernel_release_suffix:
+        description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
+        type: string
+        default: '-qgki-g6818c821e42d'
+      extra_cmdline:
+        description: '追加到内核命令行的参数（用 CONFIG_CMDLINE_EXTEND）。默认 loglevel=8 让 pstore 记下 pr_info'
+        required: false
+        default: 'loglevel=8'
+      force_builtin:
+        description: '把 ADSP/PIL/GLINK 那批 vendor 驱动强制 =y（official 路线必须开，否则链接失败）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      diag_patch:
+        description: '应用 adsprpc 诊断补丁：创建世界可读的 /proc/adsprpc_diag（卡二屏时 adb shell cat /proc/adsprpc_diag 直接看 rpdev）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      config_source:
+        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig（已验证可编过）；official = 源码树官方三件套 + force_builtin 覆盖（实验性）'
+        required: false
+        type: choice
+        default: 'dump'
+        options:
+          - 'dump'
+          - 'official'
+      build_dtbs:
+        description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
+        type: boolean
+        default: false
+
+      ksu_manager_package:
+        description: 'KernelSU-Next 面具包名。留空=内核自动扫描认领（推荐）。spoofed 版包名随机，要填得先用 adb 查真实包名'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build OPPO K10x Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    env:
+      # SOURCE_BRANCH 由「Resolve Build Inputs」步骤按输入写入
+      KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_sm6375.git
+      DRIVER_REPO: https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
+      # stock 内核是 clang 11.0.2 编的：defconfig 里 CONFIG_CLANG_VERSION=110002
+      # 原厂 defconfig: CONFIG_CLANG_VERSION=110002 → Clang 11.0.2 = clang-r383902
+      # 原厂还开了 LTO_CLANG + CFI_CLANG(强制) + MODVERSIONS，这些对编译器版本极度敏感
+      CLANG_CANDIDATES: |
+        android-11.0.0_r48:clang-r383902
+        android-12.0.0_r1:clang-r383902
+        android-11.0.0_r40:clang-r383902
+        android-11.0.0_r1:clang-r383902
+        android-12.0.0_r2:clang-r383902
+
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: '1'
+      # Droidspaces kABI 补丁脚本（base64 内嵌，避免 YAML 多行缩进问题）。
+      # 必须放 job 级 env：步骤 run 里的变量跨步骤看不到。
+      KABI_B64: "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKRHJvaWRzcGFjZXMga0FCSSDooaXkuIHvvIg1LjQgR0tJIOmAgumFjeeJiO+8iQo9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09CuWumOaWueihpeS4gSAwMDHvvIhzeXN2aXBj77yJ6IO955u05o6l5omT77yM5L2GIDAwMu+8iHBvc2l4X21xdWV1Ze+8ieS+nei1lgpBTkRST0lEX09FTV9EQVRBX0FSUkFZIOi/meS4quWujyDigJTigJQgT1BQTyDov5nmo7XmoJHph4zmsqHmnInvvIzmiYDku6XmlLnmiJDohJrmnKzmiYvlt6XmlLnjgIIKCuWOn+eQhu+8muaKiuaWsOWtl+auteWhnui/myBBbmRyb2lkIOmihOeVmeeahCB1NjQgcGFkZGluZyDmp73kvY3vvIjlgZrmiJAgdW5pb27vvInvvIwKICAgICAg6L+Z5qC3IHN0cnVjdCB0YXNrX3N0cnVjdCAvIHN0cnVjdCB1c2VyX3N0cnVjdCDnmoQqKuWkp+Wwj+WSjOW4g+WxgOmDveS4jeWPmCoq77yMCiAgICAgIOWOn+WOgiB2ZW5kb3Ig5qih5Z2X5LuN54S26IO95oyJ6ICB5YGP56e76YeP6K6/6Zeu5a2X5q6144CCCiAgICAgIOmFjeWQiCBfX0dFTktTWU1TX18g5LiLIF9BTkRST0lEX0tBQklfUkVQTEFDRSDpgIDljJbmiJAgX29yaWfvvIwKICAgICAg6L+eIGdlbmtzeW1zIOeul+WHuuadpeeahCBDUkMg6YO95LiN5Y+Y44CCCiIiIgppbXBvcnQgaW8sIHJlLCBzeXMsIG9zCgpkZWYgcmVhZChwKToKICAgIHJldHVybiBpby5vcGVuKHAsIGVuY29kaW5nPSJ1dGYtOCIsIGVycm9ycz0ic3Vycm9nYXRlZXNjYXBlIikucmVhZCgpCgpkZWYgd3JpdGUocCwgcyk6CiAgICBpby5vcGVuKHAsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IiwgZXJyb3JzPSJzdXJyb2dhdGVlc2NhcGUiKS53cml0ZShzKQoKZGVmIHN1Yl9vbmNlKHRleHQsIHBhdHRlcm4sIHJlcGwsIHdoYXQpOgogICAgbmV3LCBuID0gcmUuc3VibihwYXR0ZXJuLCByZXBsLCB0ZXh0LCBjb3VudD0xLCBmbGFncz1yZS5NKQogICAgaWYgbiAhPSAxOgogICAgICAgIHByaW50KGYiICDinJcge3doYXR9OiDplJrngrnljLnphY0ge259IOasoe+8iOacn+acmyAxIOasoe+8iSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICByZXR1cm4gTm9uZQogICAgcHJpbnQoZiIgIOKckyB7d2hhdH0iKQogICAgcmV0dXJuIG5ldwoKZGVmIHBhdGNoX3NjaGVkX2gocm9vdCk6CiAgICAiIiIwMDE6IGluY2x1ZGUvbGludXgvc2NoZWQuaCDigJTigJQgU1lTVklQQyDnlKggQUJJIHBhZGRpbmciIiIKICAgIHAgPSBvcy5wYXRoLmpvaW4ocm9vdCwgImluY2x1ZGUvbGludXgvc2NoZWQuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDmioogc3lzdnNlbSAvIHN5c3ZzaG0g5LuOIHRhc2tfc3RydWN0IOS4u+S9k+mHjOaMqui1sAogICAgcyA9IHN1Yl9vbmNlKAogICAgICAgIHMsCiAgICAgICAgcideI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidbIFx0XSpzdHJ1Y3Qgc3lzdl9zZW1bIFx0XStzeXN2c2VtO1xuJwogICAgICAgIHInWyBcdF0qc3RydWN0IHN5c3Zfc2htWyBcdF0rc3lzdnNobTtcbicKICAgICAgICByJyNlbmRpZlxuJywKICAgICAgICAnLyogSzEweC9Ecm9pZHNwYWNlczogc3lzdnNlbS9zeXN2c2htIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZyDph4zvvIxcbicKICAgICAgICAnICog6L+Z5qC35byA5ZCvIENPTkZJR19TWVNWSVBDIOS4jeS8muenu+WKqCB0YXNrX3N0cnVjdCDlkI7pnaLku7vkvZXlrZfmrrXnmoTlgY/np7vph4/jgIIgKi9cbicsCiAgICAgICAgInNjaGVkLmgg4pGgIOenu+i1sCBzeXN2c2VtL3N5c3ZzaG0iKQogICAgaWYgcyBpcyBOb25lOiByZXR1cm4gRmFsc2UKCiAgICAjIOKRoSDmioogUkVTRVJWRSg2KSg3KSg4KSDmjaLmiJAgS0FCSV9VU0UgLyBLQUJJX1JFUExBQ0UKICAgICMgICAg5rOo5oSP77ya6L+Z5Z2X5ZyoIHRhc2tfc3RydWN0IOacq+Wwvu+8jOWJjemdoue0p+i3n+edgCBSRVNFUlZFKDEpLi4oNSkKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDZcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCg3XCk7XG4nCiAgICAgICAgcidbIFx0XSpBTkRST0lEX0tBQklfUkVTRVJWRVwoOFwpO1xuJywKICAgICAgICByJ1wxI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IOWkjeeUqCAzIOS4qiB1NjQgcGFkZGluZyDmp71cbicKICAgICAgICByJ1wxICogICBzbG90NiAgICAgID0gOCDlrZfoioIgIDwtIHN0cnVjdCBzeXN2X3NlbSAgKDEg5Liq5oyH6ZKIKVxuJwogICAgICAgIHInXDEgKiAgIHNsb3Q3KzggICAgPSAxNiDlrZfoioIgPC0gc3RydWN0IHN5c3Zfc2htICAoc3RydWN0IGxpc3RfaGVhZCkgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSg2LCBzdHJ1Y3Qgc3lzdl9zZW0gc3lzdnNlbSk7XG4nCiAgICAgICAgcidcMV9BTkRST0lEX0tBQklfUkVQTEFDRShBTkRST0lEX0tBQklfUkVTRVJWRSg3KTsgQU5EUk9JRF9LQUJJX1JFU0VSVkUoOCksIHN0cnVjdCBzeXN2X3NobSBzeXN2c2htKTtcbicKICAgICAgICByJ1wxI2Vsc2VcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoNik7XG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDcpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSg4KTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJzY2hlZC5oIOKRoSBSRVNFUlZFKDYvNy84KSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgc2NoZWQuaCDmsqHlj5jljJYiLCBmaWxlPXN5cy5zdGRlcnIpOyByZXR1cm4gRmFsc2UKICAgIHdyaXRlKHAsIHMpCiAgICByZXR1cm4gVHJ1ZQoKZGVmIHBhdGNoX3VzZXJfaChyb290KToKICAgICIiIjAwMjogaW5jbHVkZS9saW51eC9zY2hlZC91c2VyLmgg4oCU4oCUIFBPU0lYX01RVUVVRSDnlKggQUJJIHBhZGRpbmcKICAgICAgIOWumOaWueihpeS4geWkmuS4gOihjCBBTkRST0lEX09FTV9EQVRBX0FSUkFZKDEsIDIp77yM5pys5qCR5rKh5pyJ6L+Z5Liq5a6P77yM5Y675o6J44CCIiIiCiAgICBwID0gb3MucGF0aC5qb2luKHJvb3QsICJpbmNsdWRlL2xpbnV4L3NjaGVkL3VzZXIuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDms6jph4rmjonkuLvkvZPph4znmoQgbXFfYnl0ZXMKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopdW5zaWduZWQgbG9uZyBtcV9ieXRlcztbIFx0XSovXCogSG93IG1hbnkgYnl0ZXMgY2FuIGJlIGFsbG9jYXRlZCB0byBtcXVldWVcPyBcKi9cbicsCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IG1xX2J5dGVzIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZ++8iHNsb3Qx77yJ77yMXG4nCiAgICAgICAgcidcMSAqIOi/memHjOW/hemhu+eVmeepuu+8jOWQpuWImSBzdHJ1Y3QgdXNlcl9zdHJ1Y3Qg5aSn5bCP5Lya5Y+Y44CCICovXG4nLAogICAgICAgICJ1c2VyLmgg4pGgIOenu+i1sCBtcV9ieXRlcyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgICMg4pGhIFJFU0VSVkUoMSkoMikgLT4gS0FCSV9VU0UoMSwgLi4uKSArIFJFU0VSVkUoMikKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDFcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCgyXCk7XG4nLAogICAgICAgIHInXDEjaWYgZGVmaW5lZChDT05GSUdfUE9TSVhfTVFVRVVFKVxuJwogICAgICAgIHInXDEvKiBLMTB4L0Ryb2lkc3BhY2VzOiBzbG90MSA9IDgg5a2X6IqCIDwtIHVuc2lnbmVkIGxvbmcgbXFfYnl0ZXMgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSgxLCB1bnNpZ25lZCBsb25nIG1xX2J5dGVzKTtcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoMik7XG4nCiAgICAgICAgcidcMSNlbHNlXG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDEpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSgyKTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJ1c2VyLmgg4pGhIFJFU0VSVkUoMS8yKSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgdXNlci5oIOayoeWPmOWMliIsIGZpbGU9c3lzLnN0ZGVycik7IHJldHVybiBGYWxzZQogICAgd3JpdGUocCwgcykKICAgIHJldHVybiBUcnVlCgpkZWYgbWFpbigpOgogICAgcm9vdCA9IHN5cy5hcmd2WzFdIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgIi4iCiAgICBwcmludChmIj09PT09IERyb2lkc3BhY2VzIGtBQkkg6KGl5LiBIC0+IHtyb290fSA9PT09PSIpCiAgICBvazEgPSBwYXRjaF9zY2hlZF9oKHJvb3QpCiAgICBvazIgPSBwYXRjaF91c2VyX2gocm9vdCkKICAgIGlmIG5vdCAob2sxIGFuZCBvazIpOgogICAgICAgIHByaW50KCI6OmVycm9yOjprQUJJIOihpeS4geWksei0pSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICBzeXMuZXhpdCgxKQogICAgcHJpbnQoIj09PT09IGtBQkkg6KGl5LiB5YWo6YOo5a6M5oiQID09PT09IikKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBtYWluKCkK"
+
+    steps:
+
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Build Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_BRANCH=oppo/sm6375_u_14.0.0_k10x_5g" >> "$GITHUB_ENV"
+          DT_BRANCH="oppo/sm6375_u_14.0.0_k10x_5g"
+          [ -n "$DT_BRANCH" ] || DT_BRANCH="oppo/sm6375_u_14.0.0_k10x_5g"
+          echo "DT_BRANCH=$DT_BRANCH" >> "$GITHUB_ENV"
+          echo "PHONE_KERNEL_RELEASE=5.4.254-qgki-g6818c821e42d" >> "$GITHUB_ENV"
+          echo "内核源码分支 : oppo/sm6375_u_14.0.0_k10x_5g"
+          echo "手机内核版本 : 5.4.254-qgki-g6818c821e42d"
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git gnupg gperf \
+            libncurses-dev libssl-dev libxml2-utils lzop rsync schedtool \
+            squashfs-tools xsltproc zip unzip zlib1g-dev python3 \
+            python-is-python3 cpio device-tree-compiler libelf-dev dwarves
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ github.run_id }}
+          restore-keys: |
+            ccache-
+
+
+      - name: Clone Official Kernel Source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --single-branch --branch "$SOURCE_BRANCH" "$KERNEL_REPO" kernel
+          if [ -n "" ]; then
+            git -C kernel fetch --depth=1 origin "" \
+              || git -C kernel fetch origin "$SOURCE_BRANCH"
+            git -C kernel checkout --detach ""
+          fi
+          test -f kernel/Makefile
+          # ★ 关键：k10x_5g 分支是 5.4.233，手机固件是 5.4.254。
+          #   直接把 SUBLEVEL 补成 254，vermagic 才会是 5.4.254-qgki-g6818c821e42d，
+          #   vendor 的 30+ 个 .ko 才肯加载。（代码仍是 233 的，这是本次实验的已知代价）
+          echo "--- 补丁前 ---"; grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' kernel/Makefile
+          sed -i -E 's/^(SUBLEVEL[[:space:]]*=[[:space:]]*)[0-9]+/\1254/' kernel/Makefile
+          echo "--- 补丁后 ---"; grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' kernel/Makefile
+          SRC="$(grep -E '^VERSION[[:space:]]*=' kernel/Makefile|tr -dc 0-9).$(grep -E '^PATCHLEVEL[[:space:]]*=' kernel/Makefile|tr -dc 0-9).$(grep -E '^SUBLEVEL[[:space:]]*=' kernel/Makefile|tr -dc 0-9)"
+          echo "::notice title=源码版本已对齐::源码 $SRC （原分支 5.4.233 → 补成 5.4.254）"
+          [ "$SRC" = "5.4.254" ] || { echo "::error::SUBLEVEL 补丁没生效，SRC=$SRC"; exit 1; }
+          git -C kernel log -1 --format='%H %s'
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' kernel/Makefile
+
+      - name: Verify Source Version Matches Phone Firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          get() { grep -E "^$1[[:space:]]*=" kernel/Makefile | head -1 | tr -dc '0-9'; }
+          SRC_VER="$(get VERSION).$(get PATCHLEVEL).$(get SUBLEVEL)"
+          echo "源码内核版本: $SRC_VER"
+
+          if [ -z "${PHONE_KERNEL_RELEASE:-}" ]; then
+            echo "::warning::没填 phone_kernel_release，跳过一致性检查。强烈建议填手机上的完整 uname -r"
+            exit 0
+          fi
+
+          PHONE_VER=$(echo "$PHONE_KERNEL_RELEASE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+          echo "手机内核版本: $PHONE_VER"
+
+          if [ "$SRC_VER" != "$PHONE_VER" ]; then
+            echo "::warning::源码 $SRC_VER != 手机固件 $PHONE_VER，版本不一致。"
+                                                echo "  ★ 已查实：OPPO 公开的 27 个 sm6375 分支里只有 3 个是 5.4.254："
+                        echo "    u_14_oppo_f21s_pro_5g / u_14_oppo_reno9_a / v_15.0.0(Android15)。"
+                        echo "    所有 k10x 分支都是 5.4.147 或 5.4.233 —— 没有 5.4.254。"
+                        echo "    本工作流用 k10x_5g（K10x 自己的树，驱动配套）+ 已把 SUBLEVEL 补成 254，"
+                        echo "    所以这里版本一致。这是本次实验唯一的人为改动，务必记住。"
+          else
+            echo "版本一致"
+          fi
+
+      - name: Clone Official Modules and Devicetree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --single-branch --branch "$DT_BRANCH" "$DRIVER_REPO" devicetree
+          if [ -n "" ]; then
+            git -C devicetree fetch --depth=1 origin "" \
+              || git -C devicetree fetch origin "$DT_BRANCH"
+            git -C devicetree checkout --detach ""
+          fi
+          git -C devicetree log -1 --format='%H %s'
+          test -d devicetree/kernel/msm-5.4/techpack
+          test -d devicetree/vendor/oplus/kernel
+          test -d devicetree/vendor/qcom/proprietary/devicetree
+
+      # ----------------------------------------------------------------------
+      # 组装内核树：必须是 <X>/kernel/msm-5.4  +  <X>/vendor
+      # 这里 <X> = $GITHUB_WORKSPACE/devicetree
+      # ----------------------------------------------------------------------
+      - name: Assemble Kernel Tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KERNEL_DIR="$GITHUB_WORKSPACE/kernel"
+          DRIVER_DIR="$GITHUB_WORKSPACE/devicetree"
+          BUILD_DIR="$DRIVER_DIR/kernel/msm-5.4"
+
+          test -d "$BUILD_DIR"
+
+          # 1) 内核源码覆盖进去（DT 仓库原有的 techpack/ 会被保留并补全）
+          rsync -a --exclude='.git' "$KERNEL_DIR/" "$BUILD_DIR/"
+
+          # 1.5) WLAN 模块：内核树里没有 qcacld-3.0，它在 DT 仓库的 vendor 下。
+          #      这一段照抄能开机的配方，缺了它 WiFi 根本编不出来。
+          for d in qcacld-3.0 qca-wifi-host-cmn fw-api utils; do
+            ln -sfn "$DRIVER_DIR/vendor/qcom/opensource/wlan/$d" "$BUILD_DIR/drivers/staging/$d"
+          done
+          grep -q "qcacld-3.0/Kconfig" "$BUILD_DIR/drivers/staging/Kconfig" || \
+            echo "source \"drivers/staging/qcacld-3.0/Kconfig\"" >> "$BUILD_DIR/drivers/staging/Kconfig"
+          grep -q "qcacld-3.0/" "$BUILD_DIR/drivers/staging/Makefile" || \
+            echo "obj-$(CONFIG_QCA_CLD_WLAN) += qcacld-3.0/" >> "$BUILD_DIR/drivers/staging/Makefile"
+          sed -i 's|^WLAN_ROOT := drivers/staging/qcacld-3.0|WLAN_ROOT := $(srctree)/$(src)|' \
+            "$DRIVER_DIR/vendor/qcom/opensource/wlan/qcacld-3.0/Kbuild"
+
+          # 1.8) 顶层 Makefile 里所有 -Werror=xxx 改成 -Wno-error=xxx。
+          #      通用 -Wno-error 压不住具体的 -Werror=xxx（具体优先于通用），
+          #      必须逐个点名；直接改 Makefile 一次覆盖所有类别。
+          sed -i 's/-Werror=/-Wno-error=/g' "$BUILD_DIR/Makefile"
+          # 1.9) 真凶：scripts/gcc-wrapper.py 会把名单上的 warning 判成
+          #      "error, forbidden warning: xxx.c:NNN" 硬错误 —— 任何 -Wno-error
+          #      都压不住它（它根本不过编译器）。直接换成透传，让编译器自己说话。
+          GW="$BUILD_DIR/scripts/gcc-wrapper.py"
+          if [ -f "$GW" ]; then
+            cp -f "$GW" "$GW.orig"
+            printf '%s\n' '#!/usr/bin/env python3' 'import sys, subprocess' 'sys.exit(subprocess.call(sys.argv[1:]))' > "$GW"
+            chmod +x "$GW"
+            echo "gcc-wrapper.py 已换成透传（原文件存为 gcc-wrapper.py.orig）"
+          else
+            echo "没有 scripts/gcc-wrapper.py，跳过"
+          fi
+          echo "顶层 Makefile 剩余 -Werror= 行数: $(grep -c -e -Werror= "$BUILD_DIR/Makefile" || true)"
+
+          # 1.7) 修旧式函数定义：这棵树自带 -Werror=strict-prototypes，
+          #      sched_assist_slide.c 里 adjust_sched_assist_input_ctrl() 缺 (void)。
+          #      直接补原型，比用 -Wno-error 把整类检查全关掉干净。
+          python3 - "$BUILD_DIR/kernel/sched_assist/sched_assist_slide.c" <<'PYEOF'
+          import re, sys, os
+          p = sys.argv[1]
+          if os.path.exists(p):
+              s = open(p, encoding="utf-8", errors="replace").read()
+              s2 = re.sub(r'(?m)^([A-Za-z_][A-Za-z0-9_ \t\*]*[ \t\*])([A-Za-z_][A-Za-z0-9_]*)\(\)([ \t]*)\{',
+                          r'\1\2(void)\3{', s)
+              if s2 != s:
+                  open(p, "w", encoding="utf-8").write(s2)
+                  print("已补原型:", p)
+              else:
+                  print("没找到旧式定义:", p)
+          else:
+              print("文件不存在:", p)
+          PYEOF
+
+
+
+          # 2) 删掉 DT 仓库自己的 .git。内核树嵌在它的工作区里，
+          #    scripts/setlocalversion 会一路往上找到这个 .git，
+          #    于是把内核版本串算成 devicetree 仓库的 -g<hash>-dirty。
+          rm -rf "${DRIVER_DIR:?}/.git"
+
+          # 3) techpack 校验：内核仓库自带的是 stub，真货来自 DT 仓库
+          for d in audio camera dataipa display video; do
+            test -d "$BUILD_DIR/techpack/$d" || { echo "::error::techpack/$d 缺失"; exit 1; }
+          done
+
+          # 4) 软链接自检：这 97 个链接断了就是「编得过但缺驱动」
+          broken=0
+          for l in \
+            arch/arm64/boot/dts/vendor \
+            drivers/power/oplus \
+            drivers/soc/oplus/system \
+            drivers/soc/oplus/device_info \
+            drivers/soc/oplus/thermal \
+            drivers/input/touchscreen/oplus_touchscreen_v2 \
+            drivers/misc/oplus_rf_cable_monitor.c \
+            net/oplus_modules \
+            mm/healthinfo \
+            mm/mm_osvelte \
+            kernel/sched_assist ; do
+            if [ ! -e "$BUILD_DIR/$l" ]; then
+              echo "::error::软链接解析失败: $l -> $(readlink "$BUILD_DIR/$l" 2>/dev/null)"
+              broken=1
+            fi
+          done
+          [ "$broken" -eq 0 ]
+
+          test -f "$BUILD_DIR/Makefile"
+          test -f "$BUILD_DIR/scripts/config"
+          echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
+          echo "===== 组装完成 ====="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' "$BUILD_DIR/Makefile"
+
+      - name: Clone Clang r383902 (11.0.2)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TOOLCHAIN_DIR="$GITHUB_WORKSPACE/toolchains"
+          mkdir -p "$TOOLCHAIN_DIR"
+          CLANG_DIR=""
+          while IFS=: read -r BR DIR; do
+            [ -z "$BR" ] && continue
+            echo "----- 尝试 $BR / $DIR -----"
+            rm -rf "$TOOLCHAIN_DIR/clang-repo"
+            if git clone --depth=1 --filter=blob:none --sparse \
+                 --branch "$BR" \
+                 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86.git \
+                 "$TOOLCHAIN_DIR/clang-repo" 2>&1 | tail -3; then
+              if git -C "$TOOLCHAIN_DIR/clang-repo" sparse-checkout set "$DIR" 2>&1 \
+                 && [ -x "$TOOLCHAIN_DIR/clang-repo/$DIR/bin/clang" ]; then
+                CLANG_DIR="$TOOLCHAIN_DIR/clang-repo/$DIR"
+                echo "✓ 用上了 $BR / $DIR"
+                break
+              fi
+            fi
+            echo "✗ $BR 里没有 $DIR，换下一个"
+          done <<< "$CLANG_CANDIDATES"
+
+          test -n "$CLANG_DIR" || { echo "::error::所有候选 clang 分支都没有 clang-r383902"; exit 1; }
+          test -x "$CLANG_DIR/bin/clang"
+          test -x "$CLANG_DIR/bin/ld.lld"
+          "$CLANG_DIR/bin/clang" --version
+          CLANGVER="$("$CLANG_DIR/bin/clang" --version 2>&1 | head -4)"
+          echo "::notice title=clang 真实版本::$CLANGVER"
+          echo "$CLANGVER" | grep -qE 'clang version 11\.0\.2' \
+            && echo "::notice title=clang 版本检查::✓ 就是 11.0.2" \
+            || echo "::warning title=clang 版本检查::✗ 不是 11.0.2（见上一条注解）"
+          echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Clone GCC 9.3 (aarch64) + GCC 4.9 (arm32)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          T="$GITHUB_WORKSPACE/toolchains"
+          mkdir -p "$T"
+          # aarch64 用 GCC 9.3：它的 binutils 认 "2654435761U" 这种 C 后缀常量，
+          # GCC 4.9 的（2014 年）不认，会在 crypto/nanshan_encode_arm64.S 汇编失败
+          git clone --depth=1 --single-branch \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-9.3.git \
+            "$T/gcc93"
+          git clone --depth=1 --single-branch --branch android-8.1.0_r68 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git \
+            "$T/gcc32"
+          test -x "$T/gcc93/bin/aarch64-buildroot-linux-gnu-gcc"
+          test -x "$T/gcc32/bin/arm-linux-androideabi-gcc"
+
+      # ----------------------------------------------------------------------
+      # KernelSU-Next 官方非 GKI 集成：走 legacy 分支，不要手工改 fs/namespace.c
+      # ----------------------------------------------------------------------
+      - name: Integrate KernelSU-Next (legacy)
+        shell: bash
+        # ★ enable_ksu 是 type:boolean，inputs.enable_ksu 拿到的是布尔值。
+        #   写成 == 'true' 在 GitHub 表达式里会变成 1 == NaN，恒为假，
+        #   导致本步骤永远被跳过（2026-10-11 run 38148624571 就是这样挂的）。
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
+          test -d drivers/kernelsu
+          echo "===== KernelSU-Next 版本 ====="
+          git -C KernelSU-Next log -1 --format='%H %s'
+          # KernelSU-Next 的 kernel/Kbuild 会在编译 drivers/kernelsu 时，判断
+          # fs/namespace.c 里有没有 path_umount，没有就现场注入一个。
+          # 本树确实没有 -> 注入确实发生了（锚点 ^static bool is_mnt_ns_file 存在）。
+          # 但注入的时机太晚：fs/ 属于 core-y，早就编译完 fs/namespace.o 了，
+          # 而 $(shell ...) 要等 make 进入 drivers/kernelsu/ 才求值 ——
+          # 符号来不及进目标文件，于是链接期 undefined symbol: path_umount。
+          # 5.4 树本来就该走 #else 的 ksys_umount 分支，强制关掉这个宏。
+          sed -i 's|^ccflags-y += -DKSU_HAS_PATH_UMOUNT|# ccflags-y += -DKSU_HAS_PATH_UMOUNT  # 强制关闭：本树无 path_umount|' \
+            KernelSU-Next/kernel/Kbuild
+          if grep -qE "^ccflags-y \+= -DKSU_HAS_PATH_UMOUNT" KernelSU-Next/kernel/Kbuild; then
+            echo "::error::KSU_HAS_PATH_UMOUNT 没能关掉，链接仍会失败"
+            exit 1
+          fi
+          echo "✓ KSU_HAS_PATH_UMOUNT 已关闭:"
+          grep -n "KSU_HAS_PATH_UMOUNT" KernelSU-Next/kernel/Kbuild || true
+          grep -n "kernelsu" drivers/Makefile || true
+          grep -n "kernelsu" drivers/Kconfig || true
+
+      - name: Set Up Swap (LTO 链接很吃内存)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
