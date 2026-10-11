@@ -162,28 +162,6 @@ on:
         description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
         type: boolean
         default: false
-      source_branch:
-        description: '内核仓库分支。k10x_5g = K10x 自己的树(5.4.233)，驱动与 K10x vendor 配套'
-        type: string
-        default: 'oppo/sm6375_u_14.0.0_k10x_5g'
-
-      devicetree_branch:
-        description: 'devicetree 仓库分支。跟内核一致即可（DTB 用原厂，不参与刷机）'
-        type: string
-        default: 'oppo/sm6375_u_14.0.0_k10x_5g'
-
-      phone_kernel_release:
-        description: '手机上「设置→关于手机→内核版本」的完整字符串，如 5.4.254-qgki-g6818c821e42d'
-        type: string
-        default: '5.4.254-qgki-g6818c821e42d'
-      kernel_commit:
-        description: '（可选）内核仓库要构建的确切 commit。填手机上 uname -r 里 -g 后面那串，可保证和固件同源'
-        type: string
-        default: ''
-      devicetree_commit:
-        description: '（可选）devicetree 仓库要构建的确切 commit'
-        type: string
-        default: ''
 
       # ── 面具识别（这两个是「面具显示未集成」的正解）──
       #
@@ -201,7 +179,7 @@ on:
       #     填了这个包名，内核就完全跳过扫描，spoofed 版也能正常认。
       #     查包名：adb shell pm list packages | grep -i -E 'ksu|rifsxd|kernel'
       ksu_manager_package:
-        description: 'KernelSU-Next 面具包名。★spoofed 版包名是构建时随机生成的（manager/spoof 用 /dev/urandom 造三段 6 字母单词替换 com.rifsxd.ksunext），每版都不同，必须用 adb shell pm list packages 实查★。官方版固定 com.rifsxd.ksunext。填了内核只比包名、跳过 /data/app 扫描与签名校验；留空=走扫描+签名校验（两个变体签名相同，都能过）'
+        description: 'KernelSU-Next 面具包名。留空=内核自动扫描认领（推荐）。spoofed 版包名随机，要填得先用 adb 查真实包名'
         type: string
         default: ''
       #     ★ spoofed 版的包名是【随机】的：manager/spoof 用 /dev/urandom 生成
@@ -213,22 +191,6 @@ on:
       #       签名校验不是问题，留空也能认。填包名主要是为了绕开 ColorOS 14
       #       那个脆弱的 /data/app 路径解析（throne_tracker.c 2026-10-07 重写过）。
       #
-      # 13. ksu_version_override：内核上报的 KSU 版本号默认是
-      #     30000 + git提交数 + 289（legacy 分支 2026-10-07 = 3017 个提交 = 33306）。
-      #     面具自带 MINIMAL_SUPPORTED_KERNEL=33188 的下限。但注意：v3.4.1 的 57 个
-      #     Kotlin 文件全扫过，这个常量【只有声明、没有任何使用点】。
-      #     面具判定「全功能」的唯一依据是 Natives.kt L175-177：
-      #         fun isFullFeatured() = isManager &&
-      #             kernelUAPIVersion == managerUAPIVersion && rootAvailable()
-      #     而 kernelUAPIVersion 和 managerUAPIVersion 两边都是 5
-      #     （uapi/supercall.h L13，legacy 分支与 v3.4.1 标签完全一致），
-      #     所以只要 isManager 为真就是全功能。
-      #     ★ 内核 33306 vs 面具 33333 这 27 的差值【没有任何地方检查】。
-      #     真要改就填 33333，纯属心理安慰。留空=自动。
-      ksu_version_override:
-        description: '强制内核上报的 KernelSU 版本号（留空=按 git 提交数自动算）。面具 v3.4.1=33333，v3.4.0=33294'
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -268,13 +230,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "SOURCE_BRANCH=${{ inputs.source_branch }}" >> "$GITHUB_ENV"
-          DT_BRANCH="${{ inputs.devicetree_branch }}"
-          [ -n "$DT_BRANCH" ] || DT_BRANCH="${{ inputs.source_branch }}"
+          echo "SOURCE_BRANCH=oppo/sm6375_u_14.0.0_k10x_5g" >> "$GITHUB_ENV"
+          DT_BRANCH="oppo/sm6375_u_14.0.0_k10x_5g"
+          [ -n "$DT_BRANCH" ] || DT_BRANCH="oppo/sm6375_u_14.0.0_k10x_5g"
           echo "DT_BRANCH=$DT_BRANCH" >> "$GITHUB_ENV"
-          echo "PHONE_KERNEL_RELEASE=${{ inputs.phone_kernel_release }}" >> "$GITHUB_ENV"
-          echo "内核源码分支 : ${{ inputs.source_branch }}"
-          echo "手机内核版本 : ${{ inputs.phone_kernel_release }}"
+          echo "PHONE_KERNEL_RELEASE=5.4.254-qgki-g6818c821e42d" >> "$GITHUB_ENV"
+          echo "内核源码分支 : oppo/sm6375_u_14.0.0_k10x_5g"
+          echo "手机内核版本 : 5.4.254-qgki-g6818c821e42d"
 
       - name: Install Dependencies
         shell: bash
@@ -301,10 +263,10 @@ jobs:
         run: |
           set -euxo pipefail
           git clone --depth=1 --single-branch --branch "$SOURCE_BRANCH" "$KERNEL_REPO" kernel
-          if [ -n "${{ inputs.kernel_commit }}" ]; then
-            git -C kernel fetch --depth=1 origin "${{ inputs.kernel_commit }}" \
+          if [ -n "" ]; then
+            git -C kernel fetch --depth=1 origin "" \
               || git -C kernel fetch origin "$SOURCE_BRANCH"
-            git -C kernel checkout --detach "${{ inputs.kernel_commit }}"
+            git -C kernel checkout --detach ""
           fi
           test -f kernel/Makefile
           # ★ 关键：k10x_5g 分支是 5.4.233，手机固件是 5.4.254。
@@ -351,10 +313,10 @@ jobs:
         run: |
           set -euxo pipefail
           git clone --depth=1 --single-branch --branch "$DT_BRANCH" "$DRIVER_REPO" devicetree
-          if [ -n "${{ inputs.devicetree_commit }}" ]; then
-            git -C devicetree fetch --depth=1 origin "${{ inputs.devicetree_commit }}" \
+          if [ -n "" ]; then
+            git -C devicetree fetch --depth=1 origin "" \
               || git -C devicetree fetch origin "$DT_BRANCH"
-            git -C devicetree checkout --detach "${{ inputs.devicetree_commit }}"
+            git -C devicetree checkout --detach ""
           fi
           git -C devicetree log -1 --format='%H %s'
           test -d devicetree/kernel/msm-5.4/techpack
@@ -1128,9 +1090,9 @@ jobs:
           else
             echo "::notice title=KernelSU 面具包名::（未指定，走扫描+签名校验；若面具显示未集成就填上）"
           fi
-          if [ -n "${{ inputs.ksu_version_override }}" ]; then
-            EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_VERSION_OVERRIDE=${{ inputs.ksu_version_override }}"
-            echo "::notice title=KernelSU 版本号::强制上报 ${{ inputs.ksu_version_override }}"
+          if [ -n "" ]; then
+            EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_VERSION_OVERRIDE="
+            echo "::notice title=KernelSU 版本号::强制上报 "
           else
             echo "::notice title=KernelSU 版本号::（自动，按 git 提交数算）"
           fi
