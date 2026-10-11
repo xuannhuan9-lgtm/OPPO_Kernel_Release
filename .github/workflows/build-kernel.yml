@@ -839,6 +839,11 @@ jobs:
           set -euxo pipefail
           cd "$BUILD_DIR"
           exec >> >(tee -a "$RUNNER_TEMP/config.log") 2>&1
+          # ★ 本步是独立 shell：上一步（生成 .config）里的 DEFCONFIG 在这里不存在。
+          #   set -u 下引用未定义变量会直接 "unbound variable" 退出，且不带 ::error:: 前缀，
+          #   所以这里必须重新定义。
+          DEFCONFIG="$GITHUB_WORKSPACE/k10x_defconfig"
+          test -f "$DEFCONFIG"
           echo "===== 关键配置最终状态（编译前最后一次核对）====="
           for k in MODVERSIONS MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY \
                    LOCALVERSION LOCALVERSION_AUTO KEXEC_SIG KEXEC_SIG_FORCE \
