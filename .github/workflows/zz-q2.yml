@@ -1,0 +1,326 @@
+# 探针 q2：Configure Kernel 的下半段
+# 跑出 1 个 job = 没问题；startup_failure = 有问题
+on:
+  workflow_dispatch:
+    inputs:
+      enable_ksu:
+        description: '是否集成 KernelSU-Next（官方 legacy 流程）。默认 true。注意：FolkPatch/APatch 也是内核级 root，与 KSU 同开会冲突，用它们取 root 读日志时请设 false'
+        type: boolean
+        default: true
+      ksu_hook:
+        description: 'KernelSU hook 模式。★必须用 kprobes★ —— syscall_table 模式不挂 reboot 系统调用，面具拿不到驱动 fd，会一直显示「未集成」'
+        type: choice
+        options:
+          - kprobes
+          - syscall_table
+        default: kprobes
+      module_sig:
+        description: '模块签名校验。off=彻底关掉（MODULE_SIG=n，module_sig_check 直接 return 0，推荐）；keep=保留校验代码但不强制（MODULE_SIG=y + FORCE=n，已验证能开机）'
+        type: choice
+        options:
+          - 'off'
+          - keep
+        default: 'off'
+      kernel_release_suffix:
+        description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
+        type: string
+        default: '-qgki-g6818c821e42d'
+      extra_cmdline:
+        description: '追加到内核命令行的参数（用 CONFIG_CMDLINE_EXTEND）。默认 loglevel=8 让 pstore 记下 pr_info'
+        required: false
+        default: 'loglevel=8'
+      force_builtin:
+        description: '把 ADSP/PIL/GLINK 那批 vendor 驱动强制 =y（official 路线必须开，否则链接失败）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      diag_patch:
+        description: '应用 adsprpc 诊断补丁：创建世界可读的 /proc/adsprpc_diag（卡二屏时 adb shell cat /proc/adsprpc_diag 直接看 rpdev）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      config_source:
+        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig（已验证可编过）；official = 源码树官方三件套 + force_builtin 覆盖（实验性）'
+        required: false
+        type: choice
+        default: 'dump'
+        options:
+          - 'dump'
+          - 'official'
+      build_dtbs:
+        description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
+        type: boolean
+        default: false
+
+      ksu_manager_package:
+        description: 'KernelSU-Next 面具包名。留空=内核自动扫描认领（推荐）。spoofed 版包名随机，要填得先用 adb 查真实包名'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build OPPO K10x Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    env:
+      # SOURCE_BRANCH 由「Resolve Build Inputs」步骤按输入写入
+      KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_sm6375.git
+      DRIVER_REPO: https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
+      # stock 内核是 clang 11.0.2 编的：defconfig 里 CONFIG_CLANG_VERSION=110002
+      # 原厂 defconfig: CONFIG_CLANG_VERSION=110002 → Clang 11.0.2 = clang-r383902
+      # 原厂还开了 LTO_CLANG + CFI_CLANG(强制) + MODVERSIONS，这些对编译器版本极度敏感
+      CLANG_CANDIDATES: |
+        android-11.0.0_r48:clang-r383902
+        android-12.0.0_r1:clang-r383902
+        android-11.0.0_r40:clang-r383902
+        android-11.0.0_r1:clang-r383902
+        android-12.0.0_r2:clang-r383902
+
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: '1'
+      # Droidspaces kABI 补丁脚本（base64 内嵌，避免 YAML 多行缩进问题）。
+      # 必须放 job 级 env：步骤 run 里的变量跨步骤看不到。
+      KABI_B64: "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKRHJvaWRzcGFjZXMga0FCSSDooaXkuIHvvIg1LjQgR0tJIOmAgumFjeeJiO+8iQo9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09CuWumOaWueihpeS4gSAwMDHvvIhzeXN2aXBj77yJ6IO955u05o6l5omT77yM5L2GIDAwMu+8iHBvc2l4X21xdWV1Ze+8ieS+nei1lgpBTkRST0lEX09FTV9EQVRBX0FSUkFZIOi/meS4quWujyDigJTigJQgT1BQTyDov5nmo7XmoJHph4zmsqHmnInvvIzmiYDku6XmlLnmiJDohJrmnKzmiYvlt6XmlLnjgIIKCuWOn+eQhu+8muaKiuaWsOWtl+auteWhnui/myBBbmRyb2lkIOmihOeVmeeahCB1NjQgcGFkZGluZyDmp73kvY3vvIjlgZrmiJAgdW5pb27vvInvvIwKICAgICAg6L+Z5qC3IHN0cnVjdCB0YXNrX3N0cnVjdCAvIHN0cnVjdCB1c2VyX3N0cnVjdCDnmoQqKuWkp+Wwj+WSjOW4g+WxgOmDveS4jeWPmCoq77yMCiAgICAgIOWOn+WOgiB2ZW5kb3Ig5qih5Z2X5LuN54S26IO95oyJ6ICB5YGP56e76YeP6K6/6Zeu5a2X5q6144CCCiAgICAgIOmFjeWQiCBfX0dFTktTWU1TX18g5LiLIF9BTkRST0lEX0tBQklfUkVQTEFDRSDpgIDljJbmiJAgX29yaWfvvIwKICAgICAg6L+eIGdlbmtzeW1zIOeul+WHuuadpeeahCBDUkMg6YO95LiN5Y+Y44CCCiIiIgppbXBvcnQgaW8sIHJlLCBzeXMsIG9zCgpkZWYgcmVhZChwKToKICAgIHJldHVybiBpby5vcGVuKHAsIGVuY29kaW5nPSJ1dGYtOCIsIGVycm9ycz0ic3Vycm9nYXRlZXNjYXBlIikucmVhZCgpCgpkZWYgd3JpdGUocCwgcyk6CiAgICBpby5vcGVuKHAsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IiwgZXJyb3JzPSJzdXJyb2dhdGVlc2NhcGUiKS53cml0ZShzKQoKZGVmIHN1Yl9vbmNlKHRleHQsIHBhdHRlcm4sIHJlcGwsIHdoYXQpOgogICAgbmV3LCBuID0gcmUuc3VibihwYXR0ZXJuLCByZXBsLCB0ZXh0LCBjb3VudD0xLCBmbGFncz1yZS5NKQogICAgaWYgbiAhPSAxOgogICAgICAgIHByaW50KGYiICDinJcge3doYXR9OiDplJrngrnljLnphY0ge259IOasoe+8iOacn+acmyAxIOasoe+8iSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICByZXR1cm4gTm9uZQogICAgcHJpbnQoZiIgIOKckyB7d2hhdH0iKQogICAgcmV0dXJuIG5ldwoKZGVmIHBhdGNoX3NjaGVkX2gocm9vdCk6CiAgICAiIiIwMDE6IGluY2x1ZGUvbGludXgvc2NoZWQuaCDigJTigJQgU1lTVklQQyDnlKggQUJJIHBhZGRpbmciIiIKICAgIHAgPSBvcy5wYXRoLmpvaW4ocm9vdCwgImluY2x1ZGUvbGludXgvc2NoZWQuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDmioogc3lzdnNlbSAvIHN5c3ZzaG0g5LuOIHRhc2tfc3RydWN0IOS4u+S9k+mHjOaMqui1sAogICAgcyA9IHN1Yl9vbmNlKAogICAgICAgIHMsCiAgICAgICAgcideI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidbIFx0XSpzdHJ1Y3Qgc3lzdl9zZW1bIFx0XStzeXN2c2VtO1xuJwogICAgICAgIHInWyBcdF0qc3RydWN0IHN5c3Zfc2htWyBcdF0rc3lzdnNobTtcbicKICAgICAgICByJyNlbmRpZlxuJywKICAgICAgICAnLyogSzEweC9Ecm9pZHNwYWNlczogc3lzdnNlbS9zeXN2c2htIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZyDph4zvvIxcbicKICAgICAgICAnICog6L+Z5qC35byA5ZCvIENPTkZJR19TWVNWSVBDIOS4jeS8muenu+WKqCB0YXNrX3N0cnVjdCDlkI7pnaLku7vkvZXlrZfmrrXnmoTlgY/np7vph4/jgIIgKi9cbicsCiAgICAgICAgInNjaGVkLmgg4pGgIOenu+i1sCBzeXN2c2VtL3N5c3ZzaG0iKQogICAgaWYgcyBpcyBOb25lOiByZXR1cm4gRmFsc2UKCiAgICAjIOKRoSDmioogUkVTRVJWRSg2KSg3KSg4KSDmjaLmiJAgS0FCSV9VU0UgLyBLQUJJX1JFUExBQ0UKICAgICMgICAg5rOo5oSP77ya6L+Z5Z2X5ZyoIHRhc2tfc3RydWN0IOacq+Wwvu+8jOWJjemdoue0p+i3n+edgCBSRVNFUlZFKDEpLi4oNSkKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDZcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCg3XCk7XG4nCiAgICAgICAgcidbIFx0XSpBTkRST0lEX0tBQklfUkVTRVJWRVwoOFwpO1xuJywKICAgICAgICByJ1wxI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IOWkjeeUqCAzIOS4qiB1NjQgcGFkZGluZyDmp71cbicKICAgICAgICByJ1wxICogICBzbG90NiAgICAgID0gOCDlrZfoioIgIDwtIHN0cnVjdCBzeXN2X3NlbSAgKDEg5Liq5oyH6ZKIKVxuJwogICAgICAgIHInXDEgKiAgIHNsb3Q3KzggICAgPSAxNiDlrZfoioIgPC0gc3RydWN0IHN5c3Zfc2htICAoc3RydWN0IGxpc3RfaGVhZCkgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSg2LCBzdHJ1Y3Qgc3lzdl9zZW0gc3lzdnNlbSk7XG4nCiAgICAgICAgcidcMV9BTkRST0lEX0tBQklfUkVQTEFDRShBTkRST0lEX0tBQklfUkVTRVJWRSg3KTsgQU5EUk9JRF9LQUJJX1JFU0VSVkUoOCksIHN0cnVjdCBzeXN2X3NobSBzeXN2c2htKTtcbicKICAgICAgICByJ1wxI2Vsc2VcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoNik7XG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDcpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSg4KTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJzY2hlZC5oIOKRoSBSRVNFUlZFKDYvNy84KSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgc2NoZWQuaCDmsqHlj5jljJYiLCBmaWxlPXN5cy5zdGRlcnIpOyByZXR1cm4gRmFsc2UKICAgIHdyaXRlKHAsIHMpCiAgICByZXR1cm4gVHJ1ZQoKZGVmIHBhdGNoX3VzZXJfaChyb290KToKICAgICIiIjAwMjogaW5jbHVkZS9saW51eC9zY2hlZC91c2VyLmgg4oCU4oCUIFBPU0lYX01RVUVVRSDnlKggQUJJIHBhZGRpbmcKICAgICAgIOWumOaWueihpeS4geWkmuS4gOihjCBBTkRST0lEX09FTV9EQVRBX0FSUkFZKDEsIDIp77yM5pys5qCR5rKh5pyJ6L+Z5Liq5a6P77yM5Y675o6J44CCIiIiCiAgICBwID0gb3MucGF0aC5qb2luKHJvb3QsICJpbmNsdWRlL2xpbnV4L3NjaGVkL3VzZXIuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDms6jph4rmjonkuLvkvZPph4znmoQgbXFfYnl0ZXMKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopdW5zaWduZWQgbG9uZyBtcV9ieXRlcztbIFx0XSovXCogSG93IG1hbnkgYnl0ZXMgY2FuIGJlIGFsbG9jYXRlZCB0byBtcXVldWVcPyBcKi9cbicsCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IG1xX2J5dGVzIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZ++8iHNsb3Qx77yJ77yMXG4nCiAgICAgICAgcidcMSAqIOi/memHjOW/hemhu+eVmeepuu+8jOWQpuWImSBzdHJ1Y3QgdXNlcl9zdHJ1Y3Qg5aSn5bCP5Lya5Y+Y44CCICovXG4nLAogICAgICAgICJ1c2VyLmgg4pGgIOenu+i1sCBtcV9ieXRlcyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgICMg4pGhIFJFU0VSVkUoMSkoMikgLT4gS0FCSV9VU0UoMSwgLi4uKSArIFJFU0VSVkUoMikKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDFcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCgyXCk7XG4nLAogICAgICAgIHInXDEjaWYgZGVmaW5lZChDT05GSUdfUE9TSVhfTVFVRVVFKVxuJwogICAgICAgIHInXDEvKiBLMTB4L0Ryb2lkc3BhY2VzOiBzbG90MSA9IDgg5a2X6IqCIDwtIHVuc2lnbmVkIGxvbmcgbXFfYnl0ZXMgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSgxLCB1bnNpZ25lZCBsb25nIG1xX2J5dGVzKTtcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoMik7XG4nCiAgICAgICAgcidcMSNlbHNlXG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDEpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSgyKTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJ1c2VyLmgg4pGhIFJFU0VSVkUoMS8yKSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgdXNlci5oIOayoeWPmOWMliIsIGZpbGU9c3lzLnN0ZGVycik7IHJldHVybiBGYWxzZQogICAgd3JpdGUocCwgcykKICAgIHJldHVybiBUcnVlCgpkZWYgbWFpbigpOgogICAgcm9vdCA9IHN5cy5hcmd2WzFdIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgIi4iCiAgICBwcmludChmIj09PT09IERyb2lkc3BhY2VzIGtBQkkg6KGl5LiBIC0+IHtyb290fSA9PT09PSIpCiAgICBvazEgPSBwYXRjaF9zY2hlZF9oKHJvb3QpCiAgICBvazIgPSBwYXRjaF91c2VyX2gocm9vdCkKICAgIGlmIG5vdCAob2sxIGFuZCBvazIpOgogICAgICAgIHByaW50KCI6OmVycm9yOjprQUJJIOihpeS4geWksei0pSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICBzeXMuZXhpdCgxKQogICAgcHJpbnQoIj09PT09IGtBQkkg6KGl5LiB5YWo6YOo5a6M5oiQID09PT09IikKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBtYWluKCkK"
+
+    steps:
+
+      - name: Configure Kernel
+        shell: bash
+        run: |
+
+          # ===== 所有配置改完之后，最后自检一次（必须放最后，否则打印的是旧值）=====
+          echo "===== 关键配置最终状态（编译前最后一次核对）====="
+          for k in MODVERSIONS MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY \
+                   LOCALVERSION LOCALVERSION_AUTO KEXEC_SIG KEXEC_SIG_FORCE \
+                   CMDLINE CMDLINE_EXTEND CMDLINE_FORCE CMDLINE_FROM_BOOTLOADER \
+                   SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE \
+                   USER_NS IP6_NF_NAT IP6_NF_TARGET_MASQUERADE TMPFS_POSIX_ACL TMPFS_XATTR \
+                   NOMOUNT CFS_BANDWIDTH CGROUP_PIDS FAIR_GROUP_SCHED; do
+            grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
+          done
+          echo
+          echo "===== 硬性断言：不成立就直接失败，避免白刷一次机 ====="
+          if grep -q '^CONFIG_MODVERSIONS=y' out/.config; then
+            echo "::error::CONFIG_MODVERSIONS 还是 y！原厂 .ko 会全部报 module_layout CRC 不符"; exit 1
+          fi
+          echo "  OK CONFIG_MODVERSIONS=n（CRC 校验已整体跳过）"
+          if grep -q '^#ifdef CONFIG_MODVERSIONS' "$BUILD_DIR/include/linux/vermagic.h"; then
+            echo "::error::vermagic.h 补丁没生效！vermagic 会少 modversions 一词 -> bad vermagic"; exit 1
+          fi
+          echo "  OK vermagic.h 已打补丁（vermagic 里仍有 modversions 一词）"
+          if grep -q '^CONFIG_MODULE_SIG_FORCE=y' out/.config; then
+            echo "::error::CONFIG_MODULE_SIG_FORCE 还是 y！原厂 .ko 没有我们的签名"; exit 1
+          fi
+          echo "  OK CONFIG_MODULE_SIG_FORCE 已关闭"
+          # module_sig=off 时，MODULE_SIG 本身也必须真的关掉
+          if [ "${{ inputs.module_sig }}" = "off" ]; then
+            if grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
+              echo "::error::module_sig=off 但 CONFIG_MODULE_SIG 还是 y！签名路径没关掉"; exit 1
+            fi
+            echo "  OK CONFIG_MODULE_SIG=n（module_sig_check 整体变成 return 0）"
+          fi
+          if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
+            echo "::error::LOCALVERSION_AUTO 还是 y，vermagic 会多出 -g<hash>"; exit 1
+          fi
+          echo "  OK CONFIG_LOCALVERSION_AUTO 已关闭"
+          LV="$(scripts/config --file out/.config --state LOCALVERSION 2>/dev/null || true)"
+          echo "  LOCALVERSION = $LV"
+          if [ "$LV" != "${{ inputs.kernel_release_suffix }}" ]; then
+            echo "::error::LOCALVERSION 不等于 ${{ inputs.kernel_release_suffix }}，vermagic 对不上"; exit 1
+          fi
+          echo "  OK vermagic 已对齐"
+          # ── Droidspaces 必需项必须为 y ──
+          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE; do
+            if ! grep -q "^CONFIG_${k}=y" out/.config; then
+              echo "::error::CONFIG_${k} 不是 y！Droidspaces 跑不起来"; exit 1
+            fi
+          done
+          echo "  OK Droidspaces 必需项全为 y"
+          # ── kABI 补丁必须在位（否则开 SYSVIPC 会平移 task_struct 偏移 -> 原厂模块崩）──
+          if ! grep -q 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem)' "$BUILD_DIR/include/linux/sched.h"; then
+            echo "::error::sched.h 缺 SYSVIPC 的 ABI padding 补丁"; exit 1
+          fi
+          if ! grep -q 'ANDROID_KABI_USE(1, unsigned long mq_bytes)' "$BUILD_DIR/include/linux/sched/user.h"; then
+            echo "::error::user.h 缺 POSIX_MQUEUE 的 ABI padding 补丁"; exit 1
+          fi
+          echo "  OK kABI 补丁在位（task_struct / user_struct 布局不变）"
+          # ── NoMount ──
+          if ! grep -q "^CONFIG_NOMOUNT=y" out/.config; then
+            echo "::error::CONFIG_NOMOUNT 不是 y！NoMount 没编进去"; exit 1
+          fi
+          echo "  OK CONFIG_NOMOUNT=y"
+          # ── 官方红线 ──
+          if grep -q "^CONFIG_CFS_BANDWIDTH=y" out/.config; then
+            echo "::error::CONFIG_CFS_BANDWIDTH=y！Droidspaces 官方警告会破坏 kABI -> 无限重启"; exit 1
+          fi
+          if grep -q "^CONFIG_CGROUP_PIDS=y" out/.config; then
+            echo "::error::CONFIG_CGROUP_PIDS=y！Droidspaces 官方警告会破坏 kABI -> 无限重启"; exit 1
+          fi
+          echo "  OK CFS_BANDWIDTH / CGROUP_PIDS 保持关闭（官方红线）"
+          # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
+          scripts/config --file out/.config --disable DEBUG_INFO
+
+          export PATH="$CLANG_DIR/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CC=clang LD=ld.lld LLVM=1
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
+          export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
+
+          make O=out olddefconfig
+
+          # ===== ★ olddefconfig 之后的最终核对（必需）=====
+          # 上面那些断言跑在 olddefconfig **之前**，那时 scripts/config 刚写进去的值
+          # 还没经过依赖裁剪。依赖不满足的符号会被 olddefconfig 静默丢掉，
+          # 而下面那个「被丢弃的符号」报告只比对 $DEFCONFIG（手机 dump），
+          # 发现不了我们新加的符号被丢 —— 所以这里必须再查一遍真正生效的值。
+          echo "===== Droidspaces / NoMount 最终生效值（olddefconfig 之后）====="
+          grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|NETFILTER_XT_MATCH_ADDRTYPE|USER_NS|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|TMPFS_POSIX_ACL|TMPFS_XATTR|NOMOUNT|CFS_BANDWIDTH|CGROUP_PIDS|FAIR_GROUP_SCHED)=' out/.config || true
+          echo
+          DS_MISSING=""
+          # 必需项 + 建议项全部要求 =y：
+          # 本工作流只编 Image.gz / Image，不编 modules，任何解析成 =m 的都会静默丢失。
+          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE \
+                   USER_NS IP6_NF_NAT IP6_NF_TARGET_MASQUERADE TMPFS_POSIX_ACL TMPFS_XATTR \
+                   NOMOUNT; do
+            grep -q "^CONFIG_${k}=y" out/.config || DS_MISSING="$DS_MISSING $k"
+          done
+          if [ -n "$DS_MISSING" ]; then
+            echo "::error::olddefconfig 之后这些必需项没生效：$DS_MISSING（依赖不满足被静默丢掉）"
+            exit 1
+          fi
+          echo "  OK Droidspaces + NoMount 必需项在 olddefconfig 之后仍全部 =y"
+          for k in CFS_BANDWIDTH CGROUP_PIDS; do
+            if grep -q "^CONFIG_${k}=y" out/.config; then
+              echo "::error::olddefconfig 之后 CONFIG_${k}=y！破坏 kABI -> 无限重启"; exit 1
+            fi
+          done
+          echo "  OK CFS_BANDWIDTH / CGROUP_PIDS 在 olddefconfig 之后仍未开启"
+          # 卡二屏的三个关键项，olddefconfig 之后必须仍然成立
+          if grep -q '^CONFIG_MODVERSIONS=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_MODVERSIONS 又变回 y！原厂 .ko 会全部 CRC 不符 -> 卡二屏"; exit 1
+          fi
+          if grep -q '^CONFIG_MODULE_SIG_FORCE=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_MODULE_SIG_FORCE 又变回 y！"; exit 1
+          fi
+          if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_LOCALVERSION_AUTO 又变回 y！vermagic 会多出 -g<hash>"; exit 1
+          fi
+          if [ "${{ inputs.module_sig }}" = "off" ] && grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_MODULE_SIG 又变回 y！"; exit 1
+          fi
+          echo "  OK MODVERSIONS=n / MODULE_SIG_FORCE=n / MODULE_SIG=n / LOCALVERSION_AUTO=n 在 olddefconfig 之后仍成立"
+          # KernelSU-Next：CONFIG_KSU 是 tristate + default y，但要确认没被裁成 =m 或被丢
+          if [ "${{ inputs.enable_ksu }}" = "true" ]; then
+            # 期望的 hook 符号跟着 ksu_hook 走：kprobes -> KSU_KPROBES_HOOK，
+            # syscall_table -> KSU_SYSCALL_TABLE_HOOK。写死其中一个会误报。
+            if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              KSU_HOOK_SYM=KSU_KPROBES_HOOK
+            else
+              KSU_HOOK_SYM=KSU_SYSCALL_TABLE_HOOK
+            fi
+            for k in KSU "$KSU_HOOK_SYM"; do
+              if ! grep -q "^CONFIG_${k}=y" out/.config; then
+                echo "::error::olddefconfig 之后 CONFIG_${k} 不是 y！KernelSU-Next 没编进去"; exit 1
+              fi
+            done
+            # 这三个开关一旦被打开，面具必定认不到内核：
+            #   KSU_MANUAL_HOOK      =y -> choice 块整段不可用，两个动态钩子全丢
+            #   KSU_DISABLE_MANAGER  =y -> 内核直接不做面具识别
+            #   KSU_DISABLE_POLICY   =y -> 每个 App 的 root 配置失效
+            for k in KSU_MANUAL_HOOK KSU_DISABLE_MANAGER KSU_DISABLE_POLICY; do
+              if grep -q "^CONFIG_${k}=y" out/.config; then
+                echo "::error::olddefconfig 之后 CONFIG_${k}=y！这会让面具显示「未集成」"; exit 1
+              fi
+            done
+            echo "  OK KernelSU: $KSU_HOOK_SYM=y / KSU=y / MANUAL_HOOK / DISABLE_MANAGER / DISABLE_POLICY 均未开启"
+            # kprobes 模式还要确认 syscall tracepoint 真的在（KSU 靠它抓系统调用）
+            if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              if ! grep -q "^CONFIG_FTRACE_SYSCALLS=y" out/.config; then
+                echo "::error::kprobes 模式但 CONFIG_FTRACE_SYSCALLS 不是 y！sys_enter tracepoint 不存在，KSU 编不过"; exit 1
+              fi
+              echo "  OK FTRACE_SYSCALLS=y（sys_enter/sys_exit tracepoint 可用）"
+            fi
+            # 另一个 hook 符号必须是 n：两个同时 =y 时 Kbuild L170-172 会
+            # $(error -- KernelSU-Next: No hooks were defined...)，直接编译失败。
+            if [ "$KSU_HOOK_SYM" = "KSU_KPROBES_HOOK" ]; then
+              OTHER_HOOK=KSU_SYSCALL_TABLE_HOOK
+            else
+              OTHER_HOOK=KSU_KPROBES_HOOK
+            fi
+            if grep -q "^CONFIG_${OTHER_HOOK}=y" out/.config; then
+              echo "::error::${OTHER_HOOK}=y 与 ${KSU_HOOK_SYM}=y 同时打开，Kbuild 会报 No hooks were defined"; exit 1
+            fi
+            if grep -qE '^ccflags-y \+= -DKSU_HAS_PATH_UMOUNT' "$BUILD_DIR/KernelSU-Next/kernel/Kbuild"; then
+              echo "::error::KSU_HAS_PATH_UMOUNT 没关掉，链接期会 undefined symbol: path_umount"; exit 1
+            fi
+            echo "  OK KernelSU-Next: KSU=y + ${KSU_HOOK_SYM}=y + ${OTHER_HOOK}=n + PATH_UMOUNT 已关"
+          else
+            echo "  （enable_ksu=false，跳过 KernelSU 核对）"
+          fi
+          echo "::notice title=配置最终核对::olddefconfig 之后 Droidspaces 必需项 + NoMount + 卡二屏三项全部符合预期"
+
+          echo "===== KernelSU 配置 ====="
+          grep -E 'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES)=' out/.config || true
+
+          # 符号丢失报告：defconfig 里被 olddefconfig 静默丢掉的开关
+          echo "===== 被丢弃的符号（=y/=m 但最终没生效）====="
+          python3 - "$DEFCONFIG" out/.config <<'PY'
+          import re, sys
+          def load(p):
+              d = {}
+              for line in open(p, errors="replace"):
+                  m = re.match(r'(CONFIG_[A-Za-z0-9_]+)=(.*)', line.strip())
+                  if m:
+                      d[m.group(1)] = m.group(2)
+              return d
+          src, dst = load(sys.argv[1]), load(sys.argv[2])
+          lost = sorted(k for k, v in src.items()
+                        if v in ("y", "m") and dst.get(k) not in ("y", "m"))
+          print("输入 %d 个 =y/=m，输出 %d 个" % (len(src), sum(1 for v in dst.values() if v in ("y", "m"))))
+          print("被丢弃 %d 个：" % len(lost))
+          for k in lost:
+              print("   ", k)
+          print("::notice title=被丢弃的符号::" + (" ".join(lost) if lost else "(无)"))
+          PY
+          echo
+          echo "===== 值被改变的符号 ====="
+          python3 - "$DEFCONFIG" out/.config <<'PY'
+          import re, sys
+          def load(p):
+              d = {}
+              for line in open(p, errors="replace"):
+                  line = line.strip()
+                  m = re.match(r'(CONFIG_[A-Za-z0-9_]+)=(.*)', line)
+                  if m: d[m.group(1)] = m.group(2)
+                  m2 = re.match(r'# (CONFIG_[A-Za-z0-9_]+) is not set', line)
+                  if m2: d[m2.group(1)] = "n"
+              return d
+          a, b = load(sys.argv[1]), load(sys.argv[2])
+          chg = [(k, a[k], b[k]) for k in a if k in b and a[k] != b[k]]
+          print("值变了 %d 个：" % len(chg))
+          for k, x, y in chg[:60]:
+              print("   %s: %s -> %s" % (k, x, y))
+          if len(chg) > 60: print("   ...（还有 %d 个）" % (len(chg) - 60))
+          new = [k for k in b if k not in a]
+          print("out/.config 里新增 %d 个：" % len(new))
+          for k in new[:60]:
+              print("   %s=%s" % (k, b[k]))
+          if len(new) > 60: print("   ...（还有 %d 个）" % (len(new) - 60))
+          PY
+          echo
+          echo "===== ADSP / remoteproc / PIL 最终值 ====="
+          grep -E '^CONFIG_(MSM_PIL|MSM_SUBSYSTEM_RESTART|MSM_PIL_SSR|QCOM_MDT_LOADER|QCOM_SCM|QCOM_SMEM|QCOM_SMP2P|QCOM_GLINK|MSM_GLINK_SSR|MSM_CDSP_LOADER|MSM_ADSPRPC|REMOTEPROC|RPMSG|QCOM_QMI|MSM_SERVICE_|MSM_BOOT_STATS|FW_LOADER)' out/.config | sort
+          echo
+          echo "===== 编译器记录值 ====="
+          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|GCC_VERSION|LD_IS_LLD|LTO|THINLTO|CFI_CLANG|MODVERSIONS|SHADOW_CALL_STACK)' out/.config | sort
+
+          echo "===== 内核版本串 ====="
+          make O=out -s kernelrelease

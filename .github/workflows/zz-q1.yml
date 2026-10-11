@@ -1,0 +1,294 @@
+# 探针 q1：Configure Kernel 的上半段
+# 跑出 1 个 job = 没问题；startup_failure = 有问题
+on:
+  workflow_dispatch:
+    inputs:
+      enable_ksu:
+        description: '是否集成 KernelSU-Next（官方 legacy 流程）。默认 true。注意：FolkPatch/APatch 也是内核级 root，与 KSU 同开会冲突，用它们取 root 读日志时请设 false'
+        type: boolean
+        default: true
+      ksu_hook:
+        description: 'KernelSU hook 模式。★必须用 kprobes★ —— syscall_table 模式不挂 reboot 系统调用，面具拿不到驱动 fd，会一直显示「未集成」'
+        type: choice
+        options:
+          - kprobes
+          - syscall_table
+        default: kprobes
+      module_sig:
+        description: '模块签名校验。off=彻底关掉（MODULE_SIG=n，module_sig_check 直接 return 0，推荐）；keep=保留校验代码但不强制（MODULE_SIG=y + FORCE=n，已验证能开机）'
+        type: choice
+        options:
+          - 'off'
+          - keep
+        default: 'off'
+      kernel_release_suffix:
+        description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
+        type: string
+        default: '-qgki-g6818c821e42d'
+      extra_cmdline:
+        description: '追加到内核命令行的参数（用 CONFIG_CMDLINE_EXTEND）。默认 loglevel=8 让 pstore 记下 pr_info'
+        required: false
+        default: 'loglevel=8'
+      force_builtin:
+        description: '把 ADSP/PIL/GLINK 那批 vendor 驱动强制 =y（official 路线必须开，否则链接失败）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      diag_patch:
+        description: '应用 adsprpc 诊断补丁：创建世界可读的 /proc/adsprpc_diag（卡二屏时 adb shell cat /proc/adsprpc_diag 直接看 rpdev）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      config_source:
+        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig（已验证可编过）；official = 源码树官方三件套 + force_builtin 覆盖（实验性）'
+        required: false
+        type: choice
+        default: 'dump'
+        options:
+          - 'dump'
+          - 'official'
+      build_dtbs:
+        description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
+        type: boolean
+        default: false
+
+      ksu_manager_package:
+        description: 'KernelSU-Next 面具包名。留空=内核自动扫描认领（推荐）。spoofed 版包名随机，要填得先用 adb 查真实包名'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build OPPO K10x Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    env:
+      # SOURCE_BRANCH 由「Resolve Build Inputs」步骤按输入写入
+      KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_sm6375.git
+      DRIVER_REPO: https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
+      # stock 内核是 clang 11.0.2 编的：defconfig 里 CONFIG_CLANG_VERSION=110002
+      # 原厂 defconfig: CONFIG_CLANG_VERSION=110002 → Clang 11.0.2 = clang-r383902
+      # 原厂还开了 LTO_CLANG + CFI_CLANG(强制) + MODVERSIONS，这些对编译器版本极度敏感
+      CLANG_CANDIDATES: |
+        android-11.0.0_r48:clang-r383902
+        android-12.0.0_r1:clang-r383902
+        android-11.0.0_r40:clang-r383902
+        android-11.0.0_r1:clang-r383902
+        android-12.0.0_r2:clang-r383902
+
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: '1'
+      # Droidspaces kABI 补丁脚本（base64 内嵌，避免 YAML 多行缩进问题）。
+      # 必须放 job 级 env：步骤 run 里的变量跨步骤看不到。
+      KABI_B64: "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKRHJvaWRzcGFjZXMga0FCSSDooaXkuIHvvIg1LjQgR0tJIOmAgumFjeeJiO+8iQo9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09CuWumOaWueihpeS4gSAwMDHvvIhzeXN2aXBj77yJ6IO955u05o6l5omT77yM5L2GIDAwMu+8iHBvc2l4X21xdWV1Ze+8ieS+nei1lgpBTkRST0lEX09FTV9EQVRBX0FSUkFZIOi/meS4quWujyDigJTigJQgT1BQTyDov5nmo7XmoJHph4zmsqHmnInvvIzmiYDku6XmlLnmiJDohJrmnKzmiYvlt6XmlLnjgIIKCuWOn+eQhu+8muaKiuaWsOWtl+auteWhnui/myBBbmRyb2lkIOmihOeVmeeahCB1NjQgcGFkZGluZyDmp73kvY3vvIjlgZrmiJAgdW5pb27vvInvvIwKICAgICAg6L+Z5qC3IHN0cnVjdCB0YXNrX3N0cnVjdCAvIHN0cnVjdCB1c2VyX3N0cnVjdCDnmoQqKuWkp+Wwj+WSjOW4g+WxgOmDveS4jeWPmCoq77yMCiAgICAgIOWOn+WOgiB2ZW5kb3Ig5qih5Z2X5LuN54S26IO95oyJ6ICB5YGP56e76YeP6K6/6Zeu5a2X5q6144CCCiAgICAgIOmFjeWQiCBfX0dFTktTWU1TX18g5LiLIF9BTkRST0lEX0tBQklfUkVQTEFDRSDpgIDljJbmiJAgX29yaWfvvIwKICAgICAg6L+eIGdlbmtzeW1zIOeul+WHuuadpeeahCBDUkMg6YO95LiN5Y+Y44CCCiIiIgppbXBvcnQgaW8sIHJlLCBzeXMsIG9zCgpkZWYgcmVhZChwKToKICAgIHJldHVybiBpby5vcGVuKHAsIGVuY29kaW5nPSJ1dGYtOCIsIGVycm9ycz0ic3Vycm9nYXRlZXNjYXBlIikucmVhZCgpCgpkZWYgd3JpdGUocCwgcyk6CiAgICBpby5vcGVuKHAsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IiwgZXJyb3JzPSJzdXJyb2dhdGVlc2NhcGUiKS53cml0ZShzKQoKZGVmIHN1Yl9vbmNlKHRleHQsIHBhdHRlcm4sIHJlcGwsIHdoYXQpOgogICAgbmV3LCBuID0gcmUuc3VibihwYXR0ZXJuLCByZXBsLCB0ZXh0LCBjb3VudD0xLCBmbGFncz1yZS5NKQogICAgaWYgbiAhPSAxOgogICAgICAgIHByaW50KGYiICDinJcge3doYXR9OiDplJrngrnljLnphY0ge259IOasoe+8iOacn+acmyAxIOasoe+8iSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICByZXR1cm4gTm9uZQogICAgcHJpbnQoZiIgIOKckyB7d2hhdH0iKQogICAgcmV0dXJuIG5ldwoKZGVmIHBhdGNoX3NjaGVkX2gocm9vdCk6CiAgICAiIiIwMDE6IGluY2x1ZGUvbGludXgvc2NoZWQuaCDigJTigJQgU1lTVklQQyDnlKggQUJJIHBhZGRpbmciIiIKICAgIHAgPSBvcy5wYXRoLmpvaW4ocm9vdCwgImluY2x1ZGUvbGludXgvc2NoZWQuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDmioogc3lzdnNlbSAvIHN5c3ZzaG0g5LuOIHRhc2tfc3RydWN0IOS4u+S9k+mHjOaMqui1sAogICAgcyA9IHN1Yl9vbmNlKAogICAgICAgIHMsCiAgICAgICAgcideI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidbIFx0XSpzdHJ1Y3Qgc3lzdl9zZW1bIFx0XStzeXN2c2VtO1xuJwogICAgICAgIHInWyBcdF0qc3RydWN0IHN5c3Zfc2htWyBcdF0rc3lzdnNobTtcbicKICAgICAgICByJyNlbmRpZlxuJywKICAgICAgICAnLyogSzEweC9Ecm9pZHNwYWNlczogc3lzdnNlbS9zeXN2c2htIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZyDph4zvvIxcbicKICAgICAgICAnICog6L+Z5qC35byA5ZCvIENPTkZJR19TWVNWSVBDIOS4jeS8muenu+WKqCB0YXNrX3N0cnVjdCDlkI7pnaLku7vkvZXlrZfmrrXnmoTlgY/np7vph4/jgIIgKi9cbicsCiAgICAgICAgInNjaGVkLmgg4pGgIOenu+i1sCBzeXN2c2VtL3N5c3ZzaG0iKQogICAgaWYgcyBpcyBOb25lOiByZXR1cm4gRmFsc2UKCiAgICAjIOKRoSDmioogUkVTRVJWRSg2KSg3KSg4KSDmjaLmiJAgS0FCSV9VU0UgLyBLQUJJX1JFUExBQ0UKICAgICMgICAg5rOo5oSP77ya6L+Z5Z2X5ZyoIHRhc2tfc3RydWN0IOacq+Wwvu+8jOWJjemdoue0p+i3n+edgCBSRVNFUlZFKDEpLi4oNSkKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDZcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCg3XCk7XG4nCiAgICAgICAgcidbIFx0XSpBTkRST0lEX0tBQklfUkVTRVJWRVwoOFwpO1xuJywKICAgICAgICByJ1wxI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IOWkjeeUqCAzIOS4qiB1NjQgcGFkZGluZyDmp71cbicKICAgICAgICByJ1wxICogICBzbG90NiAgICAgID0gOCDlrZfoioIgIDwtIHN0cnVjdCBzeXN2X3NlbSAgKDEg5Liq5oyH6ZKIKVxuJwogICAgICAgIHInXDEgKiAgIHNsb3Q3KzggICAgPSAxNiDlrZfoioIgPC0gc3RydWN0IHN5c3Zfc2htICAoc3RydWN0IGxpc3RfaGVhZCkgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSg2LCBzdHJ1Y3Qgc3lzdl9zZW0gc3lzdnNlbSk7XG4nCiAgICAgICAgcidcMV9BTkRST0lEX0tBQklfUkVQTEFDRShBTkRST0lEX0tBQklfUkVTRVJWRSg3KTsgQU5EUk9JRF9LQUJJX1JFU0VSVkUoOCksIHN0cnVjdCBzeXN2X3NobSBzeXN2c2htKTtcbicKICAgICAgICByJ1wxI2Vsc2VcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoNik7XG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDcpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSg4KTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJzY2hlZC5oIOKRoSBSRVNFUlZFKDYvNy84KSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgc2NoZWQuaCDmsqHlj5jljJYiLCBmaWxlPXN5cy5zdGRlcnIpOyByZXR1cm4gRmFsc2UKICAgIHdyaXRlKHAsIHMpCiAgICByZXR1cm4gVHJ1ZQoKZGVmIHBhdGNoX3VzZXJfaChyb290KToKICAgICIiIjAwMjogaW5jbHVkZS9saW51eC9zY2hlZC91c2VyLmgg4oCU4oCUIFBPU0lYX01RVUVVRSDnlKggQUJJIHBhZGRpbmcKICAgICAgIOWumOaWueihpeS4geWkmuS4gOihjCBBTkRST0lEX09FTV9EQVRBX0FSUkFZKDEsIDIp77yM5pys5qCR5rKh5pyJ6L+Z5Liq5a6P77yM5Y675o6J44CCIiIiCiAgICBwID0gb3MucGF0aC5qb2luKHJvb3QsICJpbmNsdWRlL2xpbnV4L3NjaGVkL3VzZXIuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDms6jph4rmjonkuLvkvZPph4znmoQgbXFfYnl0ZXMKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopdW5zaWduZWQgbG9uZyBtcV9ieXRlcztbIFx0XSovXCogSG93IG1hbnkgYnl0ZXMgY2FuIGJlIGFsbG9jYXRlZCB0byBtcXVldWVcPyBcKi9cbicsCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IG1xX2J5dGVzIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZ++8iHNsb3Qx77yJ77yMXG4nCiAgICAgICAgcidcMSAqIOi/memHjOW/hemhu+eVmeepuu+8jOWQpuWImSBzdHJ1Y3QgdXNlcl9zdHJ1Y3Qg5aSn5bCP5Lya5Y+Y44CCICovXG4nLAogICAgICAgICJ1c2VyLmgg4pGgIOenu+i1sCBtcV9ieXRlcyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgICMg4pGhIFJFU0VSVkUoMSkoMikgLT4gS0FCSV9VU0UoMSwgLi4uKSArIFJFU0VSVkUoMikKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDFcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCgyXCk7XG4nLAogICAgICAgIHInXDEjaWYgZGVmaW5lZChDT05GSUdfUE9TSVhfTVFVRVVFKVxuJwogICAgICAgIHInXDEvKiBLMTB4L0Ryb2lkc3BhY2VzOiBzbG90MSA9IDgg5a2X6IqCIDwtIHVuc2lnbmVkIGxvbmcgbXFfYnl0ZXMgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSgxLCB1bnNpZ25lZCBsb25nIG1xX2J5dGVzKTtcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoMik7XG4nCiAgICAgICAgcidcMSNlbHNlXG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDEpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSgyKTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJ1c2VyLmgg4pGhIFJFU0VSVkUoMS8yKSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgdXNlci5oIOayoeWPmOWMliIsIGZpbGU9c3lzLnN0ZGVycik7IHJldHVybiBGYWxzZQogICAgd3JpdGUocCwgcykKICAgIHJldHVybiBUcnVlCgpkZWYgbWFpbigpOgogICAgcm9vdCA9IHN5cy5hcmd2WzFdIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgIi4iCiAgICBwcmludChmIj09PT09IERyb2lkc3BhY2VzIGtBQkkg6KGl5LiBIC0+IHtyb290fSA9PT09PSIpCiAgICBvazEgPSBwYXRjaF9zY2hlZF9oKHJvb3QpCiAgICBvazIgPSBwYXRjaF91c2VyX2gocm9vdCkKICAgIGlmIG5vdCAob2sxIGFuZCBvazIpOgogICAgICAgIHByaW50KCI6OmVycm9yOjprQUJJIOihpeS4geWksei0pSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICBzeXMuZXhpdCgxKQogICAgcHJpbnQoIj09PT09IGtBQkkg6KGl5LiB5YWo6YOo5a6M5oiQID09PT09IikKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBtYWluKCkK"
+
+    steps:
+
+      - name: Configure Kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+          exec > >(tee "$RUNNER_TEMP/config.log") 2>&1
+
+          DEFCONFIG="$GITHUB_WORKSPACE/k10x_defconfig"
+          test -f "$DEFCONFIG"
+
+          mkdir -p out
+          VENDOR_CFG="$BUILD_DIR/arch/arm64/configs/vendor"
+          if [ "${{ inputs.config_source }}" = "official" ]; then
+            echo "===== 配置来源：源码树官方三件套 ====="
+            for f in holi_QGKI.config holi_GKI.config holi_debug.config; do
+              test -f "$VENDOR_CFG/$f" || { echo "::error::缺少 $VENDOR_CFG/$f"; exit 1; }
+            done
+            # 官方 config 里有 #ifdef 行，merge_config.sh 会跳过不认识的行
+            GKI_CFG="$BUILD_DIR/arch/arm64/configs/gki_defconfig"
+            test -f "$GKI_CFG" || { echo "::error::缺少 $GKI_CFG"; exit 1; }
+            rm -f out/.config out/.config.old
+            # -m = 只合并、不跑 make。绝不要把 out/.config 当输入（它刚被删掉）
+            # gki_defconfig 是基础，holi_*.config 是叠加片段
+            ARCH=arm64 scripts/kconfig/merge_config.sh -O out -m \
+              "$GKI_CFG" \
+              "$VENDOR_CFG/holi_QGKI.config" \
+              "$VENDOR_CFG/holi_GKI.config" \
+              "$VENDOR_CFG/holi_debug.config"
+            test -s out/.config || { echo "::error::合并后 out/.config 是空的"; exit 1; }
+            echo "合并后 out/.config 行数: $(wc -l < out/.config)"
+            for s in CONFIG_ANDROID_BINDER_IPC CONFIG_ANDROID_BINDERFS CONFIG_ASHMEM CONFIG_ARCH_QCOM CONFIG_MSM_ADSPRPC CONFIG_QCOM_SCM; do
+              grep -q "^$s=" out/.config && echo "  ✓ $s" || echo "  ✗ $s 缺失（合并有问题）"
+            done
+            # official 片段把这些设成 =m，但调用方在内核里 → 链接时 undefined symbol
+            # 必须强制 =y（和手机 stock 配置一致）
+            if [ "${{ inputs.force_builtin }}" = "true" ]; then
+              echo "===== 强制 vendor 驱动 =y ====="
+              for s in MSM_ADSPRPC QCOM_SCM QCOM_SMEM QCOM_SMP2P QCOM_SMP2P_SLEEPSTATE \
+                       QCOM_GLINK QCOM_GLINK_PKT MSM_GLINK_SSR MSM_SUBSYSTEM_RESTART \
+                       MSM_PIL_SSR_GENERIC MSM_SERVICE_LOCATOR MSM_SERVICE_NOTIFIER \
+                       MSM_CDSP_LOADER MSM_PIL QCOM_QMI_HELPERS ION_MSM_HEAPS \
+                       RPMSG_QCOM_GLINK_NATIVE RPMSG_QCOM_GLINK_RPM \
+                       RPMSG_QCOM_GLINK_SMEM RPMSG_QCOM_GLINK_SPSS RPMSG_CHAR \
+                       ARM_SMMU COMMON_CLK_QCOM CRYPTO_DEV_QCOM_MSM_QCE \
+                       FW_LOADER_USER_HELPER FW_LOADER_USER_HELPER_FALLBACK; do
+                scripts/config --file out/.config --enable "$s"
+              done
+              echo "  已强制 $(scripts/config --file out/.config --state MSM_ADSPRPC) MSM_ADSPRPC / $(scripts/config --file out/.config --state QCOM_SCM) QCOM_SCM"
+            fi
+          else
+            echo "===== 配置来源：手机 dump 的 k10x_defconfig ====="
+            cp "$DEFCONFIG" out/.config
+          fi
+
+          if [ "${{ inputs.enable_ksu }}" = "true" ]; then
+            # 前置断言：KSU 步骤被跳过/失败时立刻报清楚，别等到 olddefconfig 之后
+            if [ ! -d "$BUILD_DIR/drivers/kernelsu" ]; then
+              echo "::error::enable_ksu=true 但 drivers/kernelsu 不存在（Integrate KernelSU-Next 被跳过或失败）"
+              exit 1
+            fi
+            scripts/config --file out/.config --enable KSU
+
+            if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
+              # ★ KSU_KPROBES_HOOK 靠 sys_enter/sys_exit 两个 tracepoint 抓系统调用。
+              #   这两个 tracepoint 定义在 include/trace/events/syscalls.h，
+              #   而该头文件只在 kernel/trace/trace_syscalls.c 里被 include，
+              #   那个文件又是 CONFIG_FTRACE_SYSCALLS 才编译。
+              #   本机 stock config 里它是 "not set" —— 必须补上，
+              #   否则 trace_sys_enter() 不存在，KSU 编不过。
+              #   注意：这只是 tracing 功能，不影响任何结构体布局 / ABI，
+              #   和防卡二屏那套（MODVERSIONS=n + vermagic）互不干扰。
+              scripts/config --file out/.config \
+                --enable  FTRACE \
+                --enable  TRACEPOINTS \
+                --enable  FTRACE_SYSCALLS \
+                --disable KSU_MANUAL_HOOK \
+                --enable  KSU_KPROBES_HOOK \
+                --disable KSU_SYSCALL_TABLE_HOOK
+            else
+              scripts/config --file out/.config \
+                --disable KSU_MANUAL_HOOK \
+                --disable KSU_KPROBES_HOOK \
+                --enable  KSU_SYSCALL_TABLE_HOOK
+            fi
+          fi
+
+          # ★★★ 卡二屏真凶 ★★★
+          # 手机 /vendor/lib/modules/ 里的 .ko 是 OPPO 用原厂内核编的。原厂开了
+          # CONFIG_MODVERSIONS=y，每个导出符号都带 CRC 校验值；我们编出来的内核 CRC
+          # 和原厂算的不一样，于是加载时全部报：
+          #     "<模块名>: disagrees about version of symbol module_layout"
+          # dmesg 实测 200+ 个模块这样失败，其中 msm_glink_ssr / qcom_glink_spss /
+          # glink_pkt / rpmsg_char 全挂 -> ADSP 的 GLINK 传输起不来 ->
+          # adsp 的 rpmsg 通道从来没被创建 -> me->channel[0].rpdev == NULL ->
+          # adsprpc VERIFY 失败(-ENODEV) -> 所有 ADSP HAL abort() ->
+          # system_server 起不来 -> 卡二屏。
+          #
+          # 修法：关掉 MODVERSIONS。此时 check_version() / check_modstruct_version()
+          # 都退化成 "static inline ... { return 1; }"，CRC 校验整体跳过，内核只校验
+          # vermagic；vermagic 已通过 LOCALVERSION 精确对齐成
+          # 5.4.254-qgki-g6818c821e42d，所以原厂 .ko 能正常加载。
+          #
+          # 副作用：关掉后 vermagic 会少 "modversions" 一词，而 MODVERSIONS=n 时
+          # same_magic() 是整串 strcmp（不做"跳过版本串"处理）-> bad vermagic ->
+          # -ENOEXEC。所以必须同时给 include/linux/vermagic.h 打补丁把那个词补回来
+          # （见第 16 步 Patch vermagic.h）。
+          # 这两件事必须成对出现：只关 MODVERSIONS 会 bad vermagic，只打补丁没用。
+          scripts/config --file out/.config --disable MODVERSIONS
+          # stock 是 MODULE_SIG_FORCE=y，自己编的模块没有官方签名，关掉
+          scripts/config --file out/.config --disable MODULE_SIG_FORCE
+          # 内核签名相关的其余开关也要关：
+          #   MODULE_SIG_ALL=y  -> 编译时用本地生成的 key 给所有模块签名（没必要，还拖慢编译）
+          #   MODULE_SIG_KEY    -> 指向 OPPO 的签名私钥，本地没有
+          #   KEXEC_SIG*        -> 内核镜像签名校验
+          #
+          # ★ 关于 CONFIG_MODULE_SIG 本身（2026-10-11 更正）：
+          #   旧版这里写着「必须保持 =y，它会改变 struct module 布局」—— 这是【错的】。
+          #   实测本树 include/linux/module.h，sig_ok 是无条件字段：
+          #       /* preserve ABI compatibility between kernels without module
+          #        * signing enabled and signed modules. */
+          #       bool sig_ok;
+          #   没有 #ifdef 包裹，所以开不开 MODULE_SIG 都不影响结构体布局。
+          #   而且关掉更安全：kernel/module.c 的 module_sig_check() 里
+          #       default: return err;   /* All other errors are fatal, including nomem,
+          #                               * unparseable signatures and signature check
+          #                               * failures - even if signatures aren't required. */
+          #   签名验证失败(-EKEYREJECTED)即使 FORCE=n 也会直接拒绝加载。
+          #   关掉 MODULE_SIG 后该函数整体变成 return 0，这条路径彻底消失。
+          if [ "${{ inputs.module_sig }}" = "off" ]; then
+            scripts/config --file out/.config --disable MODULE_SIG
+            echo "  → MODULE_SIG=n（module_sig_check 直接返回 0，签名路径完全不存在）"
+          else
+            echo "  → MODULE_SIG 保持 =y 但不强制（FORCE=n）"
+          fi
+          scripts/config --file out/.config --disable MODULE_SIG_ALL
+          scripts/config --file out/.config --set-str MODULE_SIG_KEY ""
+          scripts/config --file out/.config --disable KEXEC_SIG            || true
+          scripts/config --file out/.config --disable KEXEC_SIG_FORCE      || true
+          scripts/config --file out/.config --disable SYSTEM_BLACKLIST_KEYRING || true
+          # ===== 诊断：ION / DMA / ADSP 相关配置实际生效情况 =====
+          # 卡二屏真凶怀疑：ION 的 ioctl ABI 和 vendor HAL 对不上
+          {
+            echo "===== ION / DMA-BUF / ADSP 实际配置 ====="
+            grep -E '^CONFIG_(ION|MSM_ION|DMABUF|DMA_SHARED_BUFFER|DMA_BUF|QCOM_ION|ADSP|RPMSG|MSM_ADSPRPC|SLIMBUS|QCOM_SCM)' out/.config | sort
+            echo
+            echo "===== /dev/ion 与 dmabuf 相关节点驱动 ====="
+            grep -E '^CONFIG_(SYNTHETIC|DMABUF_HEAPS|DMABUF_HEAPS_SYSTEM|ION_SYSTEM_HEAP|ION_CARVEOUT_HEAP|ION_CHUNK_HEAP|ION_CMA_HEAP|ION_MSM_HEAP)' out/.config | sort
+          } > "$RUNNER_TEMP/ion.txt" 2>&1 || true
+          echo "=========== ION 配置 ==========="
+          cat "$RUNNER_TEMP/ion.txt"
+          # 同时用 notice 发出来，方便在 GitHub 注解里直接看
+          IONMSG=$(head -c 6000 "$RUNNER_TEMP/ion.txt" | tr '\n' ' ' | sed 's/%/%25/g')
+          echo "::notice title=ION与DMA配置::${IONMSG}" || true
+
+          # 钉死内核版本串：/vendor 里 stock 的 .ko 靠 vermagic 校验，
+          # 版本串变了它们就全部加载失败
+          if [ -n "${{ inputs.kernel_release_suffix }}" ]; then
+            scripts/config --file out/.config \
+              --disable LOCALVERSION_AUTO \
+              --set-str LOCALVERSION "${{ inputs.kernel_release_suffix }}"
+          fi
+
+          # 追加内核命令行（loglevel=8 → pstore 记下 pr_info，能看到 GLINK/RPMSG 探测）
+          # 注意：CMDLINE 里原本有 cgroup_disable=pressure，必须保留，只追加
+          if [ -n "${{ inputs.extra_cmdline }}" ]; then
+            OLD_CMDLINE="$(scripts/config --file out/.config --state CMDLINE 2>/dev/null || true)"
+            case "$OLD_CMDLINE" in
+              *"${{ inputs.extra_cmdline }}"*) NEW_CMDLINE="$OLD_CMDLINE" ;;
+              "")  NEW_CMDLINE="${{ inputs.extra_cmdline }}" ;;
+              *)   NEW_CMDLINE="$OLD_CMDLINE ${{ inputs.extra_cmdline }}" ;;
+            esac
+            scripts/config --file out/.config --set-str CMDLINE "$NEW_CMDLINE"
+            scripts/config --file out/.config --enable CMDLINE_EXTEND
+            scripts/config --file out/.config --disable CMDLINE_FORCE
+          fi   # ← extra_cmdline 只管上面这段；下面的自检/断言必须无条件执行
+
+          # ===== Droidspaces 官方 GKI 安全配置（5.4 按官方文档属于 GKI 路线）=====
+          # 来源：ravindu644/Droidspaces-OSS  Documentation/Kernel-Configuration.md
+          # ★ 配套 kABI 补丁已在第 13 步打过（SYSVIPC/POSIX_MQUEUE 走 ABI padding），
+          #   所以这里开它们不会移动 task_struct / user_struct 的字段偏移。
+          # ★ 官方红线：下面两个会改变调度器/cgroup 结构体大小 -> 原厂模块按错偏移读
+          #   -> 无限重启。GKI 下必须保持关闭。
+          #     CONFIG_CFS_BANDWIDTH  （依赖 FAIR_GROUP_SCHED，本树 FAIR_GROUP_SCHED=n，天然开不了）
+          #     CONFIG_CGROUP_PIDS
+          scripts/config --file out/.config --disable CFS_BANDWIDTH
+          scripts/config --file out/.config --disable CGROUP_PIDS
+          # 必需项（官方 Kernel-Configuration.md）
+          scripts/config --file out/.config --enable SYSVIPC
+          scripts/config --file out/.config --enable POSIX_MQUEUE
+          scripts/config --file out/.config --enable IPC_NS
+          scripts/config --file out/.config --enable PID_NS
+          scripts/config --file out/.config --enable DEVTMPFS
+          scripts/config --file out/.config --enable NETFILTER_XT_MATCH_ADDRTYPE
+          # 建议项
+          scripts/config --file out/.config --enable USER_NS
+          scripts/config --file out/.config --enable IP6_NF_NAT
+          scripts/config --file out/.config --enable IP6_NF_TARGET_MASQUERADE
+          scripts/config --file out/.config --enable TMPFS_POSIX_ACL
+          scripts/config --file out/.config --enable TMPFS_XATTR
+          # NoMount（KernelSU metamodule；源码由第 14 步集成，这里开 built-in）
+          scripts/config --file out/.config --enable NOMOUNT
