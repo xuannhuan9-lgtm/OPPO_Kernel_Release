@@ -5,7 +5,7 @@
 #   依据     : 那个能开机的非官方内核版本串 5.4.233-qgki-unofficial-gf81d548c5043-dirty
 #   KernelSU : 关闭（先确认内核能开机，再开）
 #   赌的是   : 你之前卡二屏，是因为源码 commit 太旧（旧了 166 个 commit）
-#   产出 zip : OPPO_K10x_A_5.4.254_KSU.zip
+#   产出 zip : OPPO_K10x_A_5.4.254_{KSU|NoKSU}[_DIAG].zip
 # ============================================================================
 name: "[A] OPPO K10x k10x_5g (5.4.233->254 + KernelSU-Next)"
 
@@ -483,6 +483,38 @@ jobs:
           echo "::notice title=adsprpc 诊断补丁::已应用，新增 /proc/adsprpc_diag（0444）"
           diff -u "$TARGET.orig" "$TARGET" | head -150 || true
 
+      - name: Patch vermagic.h (keep the modversions word)
+        shell: bash
+        run: |
+          set -e
+          F="$BUILD_DIR/include/linux/vermagic.h"
+          test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
+          cp "$F" "$F.orig"
+          # 原文：
+          #   #ifdef CONFIG_MODVERSIONS
+          #   #define MODULE_VERMAGIC_MODVERSIONS "modversions "
+          #   #else
+          #   #define MODULE_VERMAGIC_MODVERSIONS ""
+          #   #endif
+          # 把 #ifdef 改成 #if 1 -> 无论 MODVERSIONS 开不开，vermagic 里都保留这个词。
+          # 这一步必须和 Configure Kernel 里的 --disable MODVERSIONS 配对使用：
+          #   关 MODVERSIONS  -> 跳过 CRC 校验（解决 module_layout 报错）
+          #   保留该词        -> vermagic 逐字一致（解决 same_magic 整串比较）
+          N=$(grep -c '^#ifdef CONFIG_MODVERSIONS$' "$F" || true)
+          echo "vermagic.h 里 #ifdef CONFIG_MODVERSIONS 出现 $N 次"
+          if [ "$N" != "1" ]; then
+            echo "::error::预期恰好 1 处，实际 $N 处，不敢乱改"; exit 1
+          fi
+          sed -i 's|^#ifdef CONFIG_MODVERSIONS$|#if 1 /* K10x: MODVERSIONS 已关，但 vermagic 必须保留 modversions 一词 */|' "$F"
+          if grep -q '^#ifdef CONFIG_MODVERSIONS' "$F"; then
+            echo "::error::sed 没生效"; exit 1
+          fi
+          echo "===== 改后的 vermagic.h ====="
+          sed -n '1,45p' "$F"
+          echo
+          grep -n 'MODULE_VERMAGIC_MODVERSIONS' "$F"
+          echo "::notice title=vermagic 补丁::MODVERSIONS=n 但 vermagic 仍含 modversions 一词，与原厂逐字一致"
+
       - name: Configure Kernel
         shell: bash
         run: |
@@ -553,6 +585,31 @@ jobs:
             fi
           fi
 
+          # ★★★ 卡二屏真凶 ★★★
+          # 手机 /vendor/lib/modules/ 里的 .ko 是 OPPO 用原厂内核编的，原厂开了
+          # CONFIG_MODVERSIONS=y，每个符号都带 CRC 校验值。我们的内核也开 MODVERSIONS，
+          # 但 CRC 和原厂不一致 -> 加载时全部报：
+          #     "<模块名>: disagrees about version of symbol module_layout"
+          # dmesg 实测有 200+ 个模块这样失败，其中 msm_glink_ssr / qcom_glink_spss /
+          # glink_pkt / rpmsg_char 全部加载失败 -> ADSP 的 GLINK 传输起不来 ->
+          # adsp 的 rpmsg 通道从来没被创建 -> me->channel[0].rpdev == NULL ->
+          # adsprpc VERIFY 失败(-ENODEV) -> 所有 ADSP HAL abort() -> 卡二屏。
+          # 关掉 MODVERSIONS 后内核不再校验符号 CRC，只校验 vermagic；vermagic 已经
+          # 通过 LOCALVERSION 精确对齐成 5.4.254-qgki-g6818c821e42d，所以原厂 .ko 能加载。
+          # ★★★ 卡二屏真凶：原厂 .ko 的符号 CRC 和我们算的不一致 ★★★
+          # dmesg 实测 200+ 个模块全报 "disagrees about version of symbol module_layout"，
+          # 其中 msm_glink_ssr / qcom_glink_spss / glink_pkt / rpmsg_char 加载失败
+          # -> ADSP 的 GLINK 传输起不来 -> adsp 的 rpmsg 通道从未创建
+          # -> me->channel[0].rpdev == NULL -> adsprpc VERIFY 失败(-ENODEV)
+          # -> 所有 ADSP HAL abort() -> system_server 起不来 -> 卡二屏。
+          #
+          # 关掉 MODVERSIONS 后 check_version() / check_modstruct_version() 都变成
+          # "static inline ... { return 1; }"，CRC 校验整体跳过。
+          #
+          # 但关掉后 vermagic 会少 "modversions" 一词，而 MODVERSIONS=n 时 same_magic()
+          # 是整串 strcmp（不做"跳过版本串"处理）-> bad vermagic -> -ENOEXEC。
+          # 所以必须同时给 include/linux/vermagic.h 打补丁把那个词补回来（见下一步）。
+          scripts/config --file out/.config --disable MODVERSIONS
           # stock 是 MODULE_SIG_FORCE=y，自己编的模块没有官方签名，关掉
           scripts/config --file out/.config --disable MODULE_SIG_FORCE
           # 内核签名相关的其余开关也要关：
@@ -581,11 +638,6 @@ jobs:
           IONMSG=$(head -c 6000 "$RUNNER_TEMP/ion.txt" | tr '\n' ' ' | sed 's/%/%25/g')
           echo "::notice title=ION与DMA配置::${IONMSG}" || true
 
-          echo "===== 签名相关配置最终状态 ====="
-          for k in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY KEXEC_SIG KEXEC_SIG_FORCE; do
-            grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
-          done
-
           # 钉死内核版本串：/vendor 里 stock 的 .ko 靠 vermagic 校验，
           # 版本串变了它们就全部加载失败
           if [ -n "${{ inputs.kernel_release_suffix }}" ]; then
@@ -594,8 +646,6 @@ jobs:
               --set-str LOCALVERSION "${{ inputs.kernel_release_suffix }}"
           fi
 
-          # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
-          scripts/config --file out/.config --disable DEBUG_INFO
           # 追加内核命令行（loglevel=8 → pstore 记下 pr_info，能看到 GLINK/RPMSG 探测）
           # 注意：CMDLINE 里原本有 cgroup_disable=pressure，必须保留，只追加
           if [ -n "${{ inputs.extra_cmdline }}" ]; then
@@ -608,6 +658,40 @@ jobs:
             scripts/config --file out/.config --set-str CMDLINE "$NEW_CMDLINE"
             scripts/config --file out/.config --enable CMDLINE_EXTEND
             scripts/config --file out/.config --disable CMDLINE_FORCE
+
+          # ===== 所有配置改完之后，最后自检一次（必须放最后，否则打印的是旧值）=====
+          echo "===== 关键配置最终状态（编译前最后一次核对）====="
+          for k in MODVERSIONS MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY \
+                   LOCALVERSION LOCALVERSION_AUTO KEXEC_SIG KEXEC_SIG_FORCE \
+                   CMDLINE CMDLINE_EXTEND CMDLINE_FORCE CMDLINE_FROM_BOOTLOADER; do
+            grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
+          done
+          echo
+          echo "===== 硬性断言：不成立就直接失败，避免白刷一次机 ====="
+          if grep -q '^CONFIG_MODVERSIONS=y' out/.config; then
+            echo "::error::CONFIG_MODVERSIONS 还是 y！原厂 .ko 会全部报 module_layout CRC 不符"; exit 1
+          fi
+          echo "  OK CONFIG_MODVERSIONS=n（CRC 校验已整体跳过）"
+          if grep -q '^#ifdef CONFIG_MODVERSIONS' "$BUILD_DIR/include/linux/vermagic.h"; then
+            echo "::error::vermagic.h 补丁没生效！vermagic 会少 modversions 一词 -> bad vermagic"; exit 1
+          fi
+          echo "  OK vermagic.h 已打补丁（vermagic 里仍有 modversions 一词）"
+          if grep -q '^CONFIG_MODULE_SIG_FORCE=y' out/.config; then
+            echo "::error::CONFIG_MODULE_SIG_FORCE 还是 y！原厂 .ko 没有我们的签名"; exit 1
+          fi
+          echo "  OK CONFIG_MODULE_SIG_FORCE 已关闭"
+          if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
+            echo "::error::LOCALVERSION_AUTO 还是 y，vermagic 会多出 -g<hash>"; exit 1
+          fi
+          echo "  OK CONFIG_LOCALVERSION_AUTO 已关闭"
+          LV="$(scripts/config --file out/.config --state LOCALVERSION 2>/dev/null || true)"
+          echo "  LOCALVERSION = $LV"
+          if [ "$LV" != "${{ inputs.kernel_release_suffix }}" ]; then
+            echo "::error::LOCALVERSION 不等于 ${{ inputs.kernel_release_suffix }}，vermagic 对不上"; exit 1
+          fi
+          echo "  OK vermagic 已对齐"
+          # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
+          scripts/config --file out/.config --disable DEBUG_INFO
           fi
 
           export PATH="$CLANG_DIR/bin:$PATH"
@@ -793,6 +877,8 @@ jobs:
           set -euxo pipefail
           cd AnyKernel3
           ZIPNAME="OPPO_K10x_A_5.4.254_$( [ "${{ inputs.enable_ksu }}" = "true" ] && echo KSU || echo NoKSU )$( [ "${{ inputs.diag_patch }}" = "true" ] && echo _DIAG || echo ).zip"
+          echo "ZIPNAME=$ZIPNAME" >> "$GITHUB_ENV"
+          echo "::notice title=AK3 包名::$ZIPNAME"
           zip -r9 "$GITHUB_WORKSPACE/$ZIPNAME" . \
             -x '.git/*' -x '.git/**' -x 'README.md' -x 'patch/*'
 
@@ -811,7 +897,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OPPO-K10x-A
-          path: OPPO_K10x_A_5.4.254_KSU.zip
+          path: ${{ env.ZIPNAME }}
           if-no-files-found: error
           retention-days: 7
 
@@ -854,6 +940,13 @@ jobs:
           CFGF="$BUILD_DIR/out/.config"
           if [ -f "$CFGF" ]; then
             echo "::notice title=内核命令行最终值::$(grep -E '^CONFIG_CMDLINE(=|_EXTEND|_FORCE|_FROM_BOOTLOADER)' "$CFGF" | tr '\n' ' | ')"
+            # 3.7) vermagic 三件套（决定原厂 .ko 能不能加载）
+            VH="$BUILD_DIR/include/linux/vermagic.h"
+            VM1="$(grep -c '^#ifdef CONFIG_MODVERSIONS' "$VH" 2>/dev/null || echo '?')"
+            VM2="$(grep -m1 'MODULE_VERMAGIC_MODVERSIONS' "$VH" 2>/dev/null | sed 's/^[ \t]*//')"
+            VM3="$(grep -E '^#? ?CONFIG_MODVERSIONS' "$CFGF" 2>/dev/null | head -1)"
+            VM4="$(grep -E '^CONFIG_LOCALVERSION(=|_AUTO)' "$CFGF" 2>/dev/null | tr '\n' ' ')"
+            echo "::notice title=vermagic 三件套::vermagic.h 里 #ifdef CONFIG_MODVERSIONS 出现 $VM1 次（必须 0）| $VM2 | $VM3 | $VM4"
           fi
 
           # 4) 最终产物
