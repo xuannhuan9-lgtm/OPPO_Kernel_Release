@@ -85,6 +85,16 @@ on:
         description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
         type: string
         default: '-qgki-g6818c821e42d'
+      extra_cmdline:
+        description: '追加到内核命令行的参数（用 CONFIG_CMDLINE_EXTEND）。默认 loglevel=8 让 pstore 记下 pr_info'
+        required: false
+        default: 'loglevel=8'
+      force_builtin:
+        description: '把 ADSP/PIL/GLINK 那批 vendor 驱动强制 =y（official 路线必须开，否则链接失败）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
       config_source:
         description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig；official = 用源码树官方三件套合并'
         required: false
@@ -454,6 +464,7 @@ jobs:
         run: |
           set -euxo pipefail
           cd "$BUILD_DIR"
+          exec > >(tee "$RUNNER_TEMP/config.log") 2>&1
 
           DEFCONFIG="$GITHUB_WORKSPACE/k10x_defconfig"
           test -f "$DEFCONFIG"
@@ -481,6 +492,22 @@ jobs:
             for s in CONFIG_ANDROID_BINDER_IPC CONFIG_ANDROID_BINDERFS CONFIG_ASHMEM CONFIG_ARCH_QCOM CONFIG_MSM_ADSPRPC CONFIG_QCOM_SCM; do
               grep -q "^$s=" out/.config && echo "  ✓ $s" || echo "  ✗ $s 缺失（合并有问题）"
             done
+            # official 片段把这些设成 =m，但调用方在内核里 → 链接时 undefined symbol
+            # 必须强制 =y（和手机 stock 配置一致）
+            if [ "${{ inputs.force_builtin }}" = "true" ]; then
+              echo "===== 强制 vendor 驱动 =y ====="
+              for s in MSM_ADSPRPC QCOM_SCM QCOM_SMEM QCOM_SMP2P QCOM_SMP2P_SLEEPSTATE \
+                       QCOM_GLINK QCOM_GLINK_PKT MSM_GLINK_SSR MSM_SUBSYSTEM_RESTART \
+                       MSM_PIL_SSR_GENERIC MSM_SERVICE_LOCATOR MSM_SERVICE_NOTIFIER \
+                       MSM_CDSP_LOADER MSM_PIL QCOM_QMI_HELPERS ION_MSM_HEAPS \
+                       RPMSG_QCOM_GLINK_NATIVE RPMSG_QCOM_GLINK_RPM \
+                       RPMSG_QCOM_GLINK_SMEM RPMSG_QCOM_GLINK_SPSS RPMSG_CHAR \
+                       ARM_SMMU COMMON_CLK_QCOM CRYPTO_DEV_QCOM_MSM_QCE \
+                       FW_LOADER_USER_HELPER FW_LOADER_USER_HELPER_FALLBACK; do
+                scripts/config --file out/.config --enable "$s"
+              done
+              echo "  已强制 $(scripts/config --file out/.config --state MSM_ADSPRPC) MSM_ADSPRPC / $(scripts/config --file out/.config --state QCOM_SCM) QCOM_SCM"
+            fi
           else
             echo "===== 配置来源：手机 dump 的 k10x_defconfig ====="
             cp "$DEFCONFIG" out/.config
@@ -545,6 +572,13 @@ jobs:
 
           # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
           scripts/config --file out/.config --disable DEBUG_INFO
+          # 追加内核命令行（loglevel=8 → pstore 记下 pr_info，能看到 GLINK/RPMSG 探测）
+          if [ -n "${{ inputs.extra_cmdline }}" ]; then
+            scripts/config --file out/.config \
+              --set-str CMDLINE "${{ inputs.extra_cmdline }}" \
+              --enable CMDLINE_EXTEND
+            echo "::notice title=内核命令行追加::${{ inputs.extra_cmdline }}"
+          fi
 
           export PATH="$CLANG_DIR/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
@@ -774,6 +808,16 @@ jobs:
 
           # 3) 关键驱动是否参与编译
           echo "::notice title=关键驱动编译记录::$(grep -E 'CC .*(adsprpc|q6v5|glink|smem|smp2p|pil|remoteproc|scm|mdt_loader|cdsp)' "$LOG" | head -40 || echo '(无)')"
+
+          # 3.5) 配置阶段的符号自检结果
+          CFG="$RUNNER_TEMP/config.log"
+          if [ -f "$CFG" ]; then
+            echo "::notice title=配置阶段符号自检::$(grep -E '^\s+[✓✗] CONFIG_' "$CFG" | tr -d ' ' | head -20 || echo '(无)')"
+            echo "::notice title=配置阶段版本串/来源::$(grep -E '配置来源|合并后 out/.config 行数|源码 5\.4' "$CFG" | head -6 || echo '(无)')"
+            echo "::notice title=配置阶段报错::$(grep -nE '::error::|Error [0-9]+|No rule to make' "$CFG" | head -10 || echo '(无)')"
+          else
+            echo "::warning title=配置日志::config.log 不存在"
+          fi
 
           # 4) 最终产物
           echo "::notice title=产物::$(ls -la "$BUILD_DIR/out/arch/arm64/boot/Image"* 2>/dev/null || echo '(无)')"
