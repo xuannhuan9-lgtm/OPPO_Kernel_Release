@@ -71,9 +71,9 @@ on:
   workflow_dispatch:
     inputs:
       enable_ksu:
-        description: '是否集成 KernelSU-Next（关掉可做对照构建，定位卡二屏）'
+        description: '是否集成 KernelSU-Next。注意：FolkPatch/APatch 也是内核级 root，与 KSU 同开会冲突；用 FolkPatch 取 root 读日志时请设 false'
         type: boolean
-        default: true
+        default: false
       ksu_hook:
         description: 'KernelSU hook 模式（5.4 非 GKI 官方推荐 syscall_table）'
         type: choice
@@ -95,14 +95,20 @@ on:
         type: choice
         default: 'true'
         options: ['true', 'false']
-      config_source:
-        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig；official = 用源码树官方三件套合并'
+      diag_patch:
+        description: '应用 adsprpc 诊断补丁：创建世界可读的 /proc/adsprpc_diag（卡二屏时 adb shell cat /proc/adsprpc_diag 直接看 rpdev）'
         required: false
         type: choice
-        default: 'official'
+        default: 'true'
+        options: ['true', 'false']
+      config_source:
+        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig（已验证可编过）；official = 源码树官方三件套 + force_builtin 覆盖（实验性）'
+        required: false
+        type: choice
+        default: 'dump'
         options:
-          - 'official'
           - 'dump'
+          - 'official'
       build_dtbs:
         description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
         type: boolean
@@ -423,6 +429,7 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Integrate KernelSU-Next (legacy)
         shell: bash
+        if: ${{ inputs.enable_ksu == 'true' }}
         run: |
           set -euxo pipefail
           cd "$BUILD_DIR"
@@ -458,6 +465,23 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
+
+      - name: Apply adsprpc Diagnostic Patch
+        shell: bash
+        if: ${{ inputs.diag_patch == 'true' }}
+        run: |
+          set -e
+          echo "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIC0qLSBjb2Rpbmc6IHV0Zi04IC0qLQojIEsxMHgg6K+K5pat6KGl5LiB77ya57uZIGFkc3BycGMuYyDliqDkuIDkuKrkuJbnlYzlj6/or7vnmoQgL3Byb2MvYWRzcHJwY19kaWFnCmltcG9ydCBzeXMsIGlvCgpwYXRoID0gc3lzLmFyZ3ZbMV0Kc3JjID0gaW8ub3BlbihwYXRoLCBlbmNvZGluZz0idXRmLTgiLCBlcnJvcnM9InN1cnJvZ2F0ZWVzY2FwZSIpLnJlYWQoKQpvcmlnX2xlbiA9IGxlbihzcmMpCgpDT1VOVEVSUyA9ICdcbi8qID09PT09IEsxMHgg6K+K5pat6KGl5LiBID09PT09ICovXG5zdGF0aWMgYXRvbWljX3QgYWRzcHJwY19wcm9iZV9jb3VudCAgICAgICAgPSBBVE9NSUNfSU5JVCgwKTtcbnN0YXRpYyBhdG9taWNfdCBhZHNwcnBjX3JwbXNnX3Byb2JlX2NvdW50ICA9IEFUT01JQ19JTklUKDApO1xuc3RhdGljIGF0b21pY190IGFkc3BycGNfcnBtc2dfcmVtb3ZlX2NvdW50ID0gQVRPTUlDX0lOSVQoMCk7XG5zdGF0aWMgY2hhciAgICAgYWRzcHJwY19sYXN0X3JwbXNnX25vZGVbODBdID0gIm5vbmUiO1xuc3RhdGljIGNoYXIgICAgIGFkc3BycGNfbGFzdF9ycG1zZ19mYWlsWzgwXSA9ICJub25lIjtcbicKRElBRyAgICAgPSAnLyogPT09PT0gSzEweCDor4rmlq3ooaXkuIHvvJovcHJvYy9hZHNwcnBjX2RpYWfvvIgwNDQ077yM5pmu6YCa55So5oi35Y+v6K+777yJPT09PT0gKi9cbnN0YXRpYyBpbnQgYWRzcHJwY19kaWFnX3Nob3coc3RydWN0IHNlcV9maWxlICptLCB2b2lkICp2KVxue1xuXHRpbnQgaTtcblx0c3RydWN0IGZhc3RycGNfYXBwcyAqbWUgPSAmZ2ZhO1xuXG5cdHNlcV9wcmludGYobSwgImFkc3BycGNfcHJvYmVfY291bnQgICAgICAgID0gJWRcXG4iLFxuXHRcdCAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3Byb2JlX2NvdW50KSk7XG5cdHNlcV9wcmludGYobSwgImFkc3BycGNfcnBtc2dfcHJvYmVfY291bnQgID0gJWRcXG4iLFxuXHRcdCAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3JwbXNnX3Byb2JlX2NvdW50KSk7XG5cdHNlcV9wcmludGYobSwgImFkc3BycGNfcnBtc2dfcmVtb3ZlX2NvdW50ID0gJWRcXG4iLFxuXHRcdCAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3JwbXNnX3JlbW92ZV9jb3VudCkpO1xuXHRzZXFfcHJpbnRmKG0sICJsYXN0X3JwbXNnX25vZGUgICAgICAgICAgICA9ICVzXFxuIiwgYWRzcHJwY19sYXN0X3JwbXNnX25vZGUpO1xuXHRzZXFfcHJpbnRmKG0sICJsYXN0X3JwbXNnX2ZhaWwgICAgICAgICAgICA9ICVzXFxuIiwgYWRzcHJwY19sYXN0X3JwbXNnX2ZhaWwpO1xuXHRzZXFfcHJpbnRmKG0sICJycG1zZ19yZWdpc3RlciAgICAgICAgICAgICA9ICVkXFxuIiwgbWUtPnJwbXNnX3JlZ2lzdGVyKTtcblx0c2VxX3ByaW50ZihtLCAiTlVNX0NIQU5ORUxTICAgICAgICAgICAgICAgPSAlZFxcbiIsIE5VTV9DSEFOTkVMUyk7XG5cdHNlcV9wcmludGYobSwgIm1lLT5jaGFubmVsKHB0cikgICAgICAgICAgID0gMHglcFxcbiIsIG1lLT5jaGFubmVsKTtcblx0aWYgKCFtZS0+Y2hhbm5lbCkge1xuXHRcdHNlcV9wcmludGYobSwgIlxcbioqKiBtZS0+Y2hhbm5lbCDku43mmK8gTlVMTO+8mumpseWKqOi/mOayoeWIneWni+WMluWujCAqKipcXG4iKTtcblx0fSBlbHNlIHtcblx0XHRzZXFfcHJpbnRmKG0sICJcXG4lLTVzICUtOHMgJS0xOHMgJS0xNHMgJS03cyAlLTEwc1xcbiIsXG5cdFx0XHQgICAiY2lkIiwgInN1YnN5cyIsICJycGRldiIsICJpc3N1YnN5c3RlbXVwIiwgInNlY3VyZSIsICJzc3Jjb3VudCIpO1xuXHRcdGZvciAoaSA9IDA7IGkgPCBOVU1fQ0hBTk5FTFM7IGkrKykge1xuXHRcdFx0c2VxX3ByaW50ZihtLCAiJS01ZCAlLThzIDB4JS0xNnAgJS0xNGQgJS03ZCAlLTEwbGx1XFxuIixcblx0XHRcdFx0ICAgaSwgZ2NpbmZvW2ldLnN1YnN5cyA/IGdjaW5mb1tpXS5zdWJzeXMgOiAiPyIsXG5cdFx0XHRcdCAgIG1lLT5jaGFubmVsW2ldLnJwZGV2LFxuXHRcdFx0XHQgICBtZS0+Y2hhbm5lbFtpXS5pc3N1YnN5c3RlbXVwLFxuXHRcdFx0XHQgICBtZS0+Y2hhbm5lbFtpXS5zZWN1cmUsXG5cdFx0XHRcdCAgICh1bnNpZ25lZCBsb25nIGxvbmcpbWUtPmNoYW5uZWxbaV0uc3NyY291bnQpO1xuXHRcdH1cblx0fVxuXHRzZXFfcHJpbnRmKG0sICJcXG4iKTtcblx0Zm9yIChpID0gMDsgaSA8IE5VTV9DSEFOTkVMUzsgaSsrKSB7XG5cdFx0c2VxX3ByaW50ZihtLCAiZ2NpbmZvWyVkXS5uYW1lPSVzIHN1YnN5cz0lcyBycGRldj0weCVwIGlzc3Vic3lzdGVtdXA9JWRcXG4iLFxuXHRcdFx0ICAgaSxcblx0XHRcdCAgIGdjaW5mb1tpXS5uYW1lID8gZ2NpbmZvW2ldLm5hbWUgOiAiPyIsXG5cdFx0XHQgICBnY2luZm9baV0uc3Vic3lzID8gZ2NpbmZvW2ldLnN1YnN5cyA6ICI/Iixcblx0XHRcdCAgIGdjaW5mb1tpXS5ycGRldixcblx0XHRcdCAgIGdjaW5mb1tpXS5pc3N1YnN5c3RlbXVwKTtcblx0fVxuXHRyZXR1cm4gMDtcbn1cblxuc3RhdGljIGludCBhZHNwcnBjX2RpYWdfb3BlbihzdHJ1Y3QgaW5vZGUgKmlub2RlLCBzdHJ1Y3QgZmlsZSAqZmlsZSlcbntcblx0cmV0dXJuIHNpbmdsZV9vcGVuKGZpbGUsIGFkc3BycGNfZGlhZ19zaG93LCBOVUxMKTtcbn1cblxuc3RhdGljIGNvbnN0IHN0cnVjdCBmaWxlX29wZXJhdGlvbnMgYWRzcHJwY19kaWFnX2ZvcHMgPSB7XG5cdC5vcGVuICAgID0gYWRzcHJwY19kaWFnX29wZW4sXG5cdC5yZWFkICAgID0gc2VxX3JlYWQsXG5cdC5sbHNlZWsgID0gc2VxX2xzZWVrLFxuXHQucmVsZWFzZSA9IHNpbmdsZV9yZWxlYXNlLFxufTtcblxuc3RhdGljIHN0cnVjdCBwcm9jX2Rpcl9lbnRyeSAqYWRzcHJwY19kaWFnX2VudHJ5O1xuXG5zdGF0aWMgdm9pZCBhZHNwcnBjX2RpYWdfY3JlYXRlKHZvaWQpXG57XG5cdGlmICghYWRzcHJwY19kaWFnX2VudHJ5KVxuXHRcdGFkc3BycGNfZGlhZ19lbnRyeSA9IHByb2NfY3JlYXRlKCJhZHNwcnBjX2RpYWciLCAwNDQ0LCBOVUxMLFxuXHRcdFx0XHRcdFx0ICZhZHNwcnBjX2RpYWdfZm9wcyk7XG5cdHByX2VycigiYWRzcHJwYy1kaWFnOiAvcHJvYy9hZHNwcnBjX2RpYWcgJXNcXG4iLFxuXHQgICAgICAgYWRzcHJwY19kaWFnX2VudHJ5ID8gImNyZWF0ZWQiIDogIkZBSUxFRCIpO1xufVxuXG4nCgpkZWYgcmVwKG9sZCwgbmV3LCB0YWcpOgogICAgZ2xvYmFsIHNyYwogICAgYXNzZXJ0IG9sZCBpbiBzcmMsICLplJrngrnmsqHmib7liLA6ICIgKyB0YWcKICAgIHNyYyA9IHNyYy5yZXBsYWNlKG9sZCwgbmV3LCAxKQoKIyAxKSDlpLTmlofku7YKaWYgIiNpbmNsdWRlIDxsaW51eC9zZXFfZmlsZS5oPiIgbm90IGluIHNyYzoKICAgIHJlcCgiI2luY2x1ZGUgPGxpbnV4L3JwbXNnLmg+IiwKICAgICAgICAiI2luY2x1ZGUgPGxpbnV4L3JwbXNnLmg+XG4jaW5jbHVkZSA8bGludXgvcHJvY19mcy5oPlxuI2luY2x1ZGUgPGxpbnV4L3NlcV9maWxlLmg+IiwKICAgICAgICAicnBtc2cuaCIpCgojIDIpIOiuoeaVsOWZqAppZiAiYWRzcHJwY19ycG1zZ19wcm9iZV9jb3VudCIgbm90IGluIHNyYzoKICAgIHJlcCgiI2RlZmluZSBSSF9DSUQgQURTUF9ET01BSU5fSUQiLAogICAgICAgICIjZGVmaW5lIFJIX0NJRCBBRFNQX0RPTUFJTl9JRFxuIiArIENPVU5URVJTLCAiUkhfQ0lEIikKCiMgMykgcnBtc2dfcHJvYmUg5aS06YOoCnJlcCgiIiJzdGF0aWMgaW50IGZhc3RycGNfcnBtc2dfcHJvYmUoc3RydWN0IHJwbXNnX2RldmljZSAqcnBkZXYpCnsKCWludCBlcnIgPSAwOwoJaW50IGNpZCA9IC0xOwoKCVZFUklGWShlcnIsICFJU19FUlJfT1JfTlVMTChycGRldikpOwoJaWYgKGVycikKCQlyZXR1cm4gLUVOT0RFVjsKIiIiLCAnc3RhdGljIGludCBmYXN0cnBjX3JwbXNnX3Byb2JlKHN0cnVjdCBycG1zZ19kZXZpY2UgKnJwZGV2KVxue1xuXHRpbnQgZXJyID0gMDtcblx0aW50IGNpZCA9IC0xO1xuXG5cdGF0b21pY19pbmMoJmFkc3BycGNfcnBtc2dfcHJvYmVfY291bnQpO1xuXHRpZiAoIUlTX0VSUl9PUl9OVUxMKHJwZGV2KSAmJiBycGRldi0+ZGV2LnBhcmVudCAmJlxuXHQgICAgcnBkZXYtPmRldi5wYXJlbnQtPm9mX25vZGUpXG5cdFx0c25wcmludGYoYWRzcHJwY19sYXN0X3JwbXNnX25vZGUsIHNpemVvZihhZHNwcnBjX2xhc3RfcnBtc2dfbm9kZSksXG5cdFx0XHQgIiVzIiwgcnBkZXYtPmRldi5wYXJlbnQtPm9mX25vZGUtPm5hbWUpO1xuXHRwcl9lcnIoImFkc3BycGMtZGlhZzogcnBtc2dfcHJvYmUgY2FsbGVkIG49JWQgbm9kZT0lc1xcbiIsXG5cdCAgICAgICBhdG9taWNfcmVhZCgmYWRzcHJwY19ycG1zZ19wcm9iZV9jb3VudCksIGFkc3BycGNfbGFzdF9ycG1zZ19ub2RlKTtcblxuXHRWRVJJRlkoZXJyLCAhSVNfRVJSX09SX05VTEwocnBkZXYpKTtcblx0aWYgKGVycikge1xuXHRcdHNucHJpbnRmKGFkc3BycGNfbGFzdF9ycG1zZ19mYWlsLCBzaXplb2YoYWRzcHJwY19sYXN0X3JwbXNnX2ZhaWwpLFxuXHRcdFx0ICJycGRldiBOVUxML0VSUiIpO1xuXHRcdHJldHVybiAtRU5PREVWO1xuXHR9XG4nLCAicnBtc2dfcHJvYmUgaGVhZCIpCgojIDQpIHJwbXNnX3Byb2JlIOWwvumDqApyZXAoIiIiCWlmIChlcnIpCgkJQURTUFJQQ19FUlIoInJwbXNnIHByb2JlIG9mICVzIGNpZCAlZCBmYWlsZWRcXG4iLAoJCQlycGRldi0+ZGV2LnBhcmVudC0+b2Zfbm9kZS0+bmFtZSwgY2lkKTsKCXJldHVybiBlcnI7Cn0iIiIsICdcdGlmIChlcnIpIHtcblx0XHRzbnByaW50ZihhZHNwcnBjX2xhc3RfcnBtc2dfZmFpbCwgc2l6ZW9mKGFkc3BycGNfbGFzdF9ycG1zZ19mYWlsKSxcblx0XHRcdCAiY2lkPSVkIG91dCBvZiByYW5nZSBub2RlPSVzIiwgY2lkLCBhZHNwcnBjX2xhc3RfcnBtc2dfbm9kZSk7XG5cdFx0cHJfZXJyKCJhZHNwcnBjLWRpYWc6IHJwbXNnIHByb2JlIEZBSUxFRCBjaWQ9JWQgbm9kZT0lc1xcbiIsXG5cdFx0ICAgICAgIGNpZCwgYWRzcHJwY19sYXN0X3JwbXNnX25vZGUpO1xuXHR9IGVsc2Uge1xuXHRcdHByX2VycigiYWRzcHJwYy1kaWFnOiBycG1zZyBwcm9iZSBPSyBjaWQ9JWQgbm9kZT0lc1xcbiIsXG5cdFx0ICAgICAgIGNpZCwgYWRzcHJwY19sYXN0X3JwbXNnX25vZGUpO1xuXHR9XG5cdHJldHVybiBlcnI7XG59JywgInJwbXNnX3Byb2JlIHRhaWwiKQoKIyA1KSByZW1vdmUg6K6h5pWwCnJlcCgiIiIJbXV0ZXhfbG9jaygmZ2NpbmZvW2NpZF0ucnBtc2dfbXV0ZXgpOwoJZ2NpbmZvW2NpZF0ucnBkZXYgPSBOVUxMOyIiIiwKICAgICIiIglhdG9taWNfaW5jKCZhZHNwcnBjX3JwbXNnX3JlbW92ZV9jb3VudCk7CgltdXRleF9sb2NrKCZnY2luZm9bY2lkXS5ycG1zZ19tdXRleCk7CglnY2luZm9bY2lkXS5ycGRldiA9IE5VTEw7IiIiLCAicmVtb3ZlIikKCiMgNikgZGlhZyDlh73mlbAgKyDlnKggZmFzdHJwY19wcm9iZSDph4zliJvlu7oKcmVwKCJzdGF0aWMgaW50IGZhc3RycGNfcHJvYmUoc3RydWN0IHBsYXRmb3JtX2RldmljZSAqcGRldilcbnsiLAogICAgRElBRyArICJzdGF0aWMgaW50IGZhc3RycGNfcHJvYmUoc3RydWN0IHBsYXRmb3JtX2RldmljZSAqcGRldilcbnsiLCAiZmFzdHJwY19wcm9iZSIpCgpyZXAoIiIiCWludCByZXQgPSAwOwoJdWludDMyX3Qgc2VjdXJlX2RvbWFpbnMgPSAwOwoKCWlmIChvZl9kZXZpY2VfaXNfY29tcGF0aWJsZShkZXYtPm9mX25vZGUsCgkJCQkJInFjb20sbXNtLWZhc3RycGMtY29tcHV0ZSIpKSB7IiIiLAogICAgJ1x0aW50IHJldCA9IDA7XG5cdHVpbnQzMl90IHNlY3VyZV9kb21haW5zID0gMDtcblxuXHRhdG9taWNfaW5jKCZhZHNwcnBjX3Byb2JlX2NvdW50KTtcblx0YWRzcHJwY19kaWFnX2NyZWF0ZSgpO1xuXHRwcl9lcnIoImFkc3BycGMtZGlhZzogZmFzdHJwY19wcm9iZSBjYWxsZWQgbj0lZCBub2RlPSVzXFxuIixcblx0ICAgICAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3Byb2JlX2NvdW50KSxcblx0ICAgICAgIChkZXYtPm9mX25vZGUgJiYgZGV2LT5vZl9ub2RlLT5uYW1lKSA/IGRldi0+b2Zfbm9kZS0+bmFtZSA6ICI/Iik7XG5cblx0aWYgKG9mX2RldmljZV9pc19jb21wYXRpYmxlKGRldi0+b2Zfbm9kZSxcblx0XHRcdFx0XHQicWNvbSxtc20tZmFzdHJwYy1jb21wdXRlIikpIHsnLCAiZmFzdHJwY19wcm9iZSBib2R5IikKCiMgNykgbW9kdWxlX2V4aXQg5riF55CGCnJlcCgiXHRkZWJ1Z2ZzX3JlbW92ZV9yZWN1cnNpdmUoZGVidWdmc19yb290KTtcbn0iLAogICAgIlx0ZGVidWdmc19yZW1vdmVfcmVjdXJzaXZlKGRlYnVnZnNfcm9vdCk7XG5cdHJlbW92ZV9wcm9jX2VudHJ5KFwiYWRzcHJwY19kaWFnXCIsIE5VTEwpO1xufSIsCiAgICAibW9kdWxlX2V4aXQiKQoKaW8ub3BlbihwYXRoLCAidyIsIGVuY29kaW5nPSJ1dGYtOCIsIGVycm9ycz0ic3Vycm9nYXRlZXNjYXBlIikud3JpdGUoc3JjKQoKY2hlY2tzID0gWwogICAgKCJwcm9jX2ZzLmgiLCAgICAgICAgICAgICAgIiNpbmNsdWRlIDxsaW51eC9wcm9jX2ZzLmg+IiBpbiBzcmMpLAogICAgKCJzZXFfZmlsZS5oIiwgICAgICAgICAgICAgIiNpbmNsdWRlIDxsaW51eC9zZXFfZmlsZS5oPiIgaW4gc3JjKSwKICAgICgi6K6h5pWw5ZmoIiwgICAgICAgICAgICAgICAgICJhZHNwcnBjX3JwbXNnX3Byb2JlX2NvdW50IiBpbiBzcmMpLAogICAgKCJwcm9iZSDorqHmlbAiLCAgICAgICAgICAgICAiYXRvbWljX2luYygmYWRzcHJwY19ycG1zZ19wcm9iZV9jb3VudCk7IiBpbiBzcmMpLAogICAgKCJkaWFnIOWHveaVsCIsICAgICAgICAgICAgICAiYWRzcHJwY19kaWFnX3Nob3ciIGluIHNyYyksCiAgICAoIk5VTEwg5L+d5oqkIiwgICAgICAgICAgICAgICJpZiAoIW1lLT5jaGFubmVsKSB7IiBpbiBzcmMpLAogICAgKCJwcm9jX2NyZWF0ZSAwNDQ0IiwgICAgICAgJ3Byb2NfY3JlYXRlKCJhZHNwcnBjX2RpYWciLCAwNDQ0JyBpbiBzcmMpLAogICAgKCJmYXN0cnBjX3Byb2JlIOmHjOWIm+W7uiIsICAgImFkc3BycGNfZGlhZ19jcmVhdGUoKTsiIGluIHNyYyksCiAgICAoInJlbW92ZV9wcm9jX2VudHJ5IiwgICAgICAncmVtb3ZlX3Byb2NfZW50cnkoImFkc3BycGNfZGlhZyIsIE5VTEwpOycgaW4gc3JjKSwKICAgICgicHJfZXJyIOiviuaWrei+k+WHuiIsICAgICAgICAiYWRzcHJwYy1kaWFnOiBycG1zZ19wcm9iZSBjYWxsZWQiIGluIHNyYyksCl0KcHJpbnQoIuihpeS4geagoemqjO+8miIpCm9rID0gVHJ1ZQpmb3IgaywgdiBpbiBjaGVja3M6CiAgICBwcmludCgiICAlcyAlcyIgJSAoIk9LICIgaWYgdiBlbHNlICJGQUlMIiwgaykpCiAgICBvayA9IG9rIGFuZCB2CnByaW50KCIgICVkIOWtl+iKgiAtPiAlZCDlrZfoioIiICUgKG9yaWdfbGVuLCBsZW4oc3JjKSkpCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=" | base64 -d > /tmp/adsprpc_diag.py
+          echo "补丁脚本 $(wc -l < /tmp/adsprpc_diag.py) 行"
+          TARGET=$(find "$BUILD_DIR" -type f -name 'adsprpc.c' -path '*adsprpc*' | head -1)
+          if [ -z "$TARGET" ]; then
+            echo "::error::找不到 adsprpc.c"; exit 1
+          fi
+          echo "::notice title=补丁目标::$TARGET"
+          cp "$TARGET" "$TARGET.orig"
+          python3 /tmp/adsprpc_diag.py "$TARGET"
+          echo "::notice title=adsprpc 诊断补丁::已应用，新增 /proc/adsprpc_diag（0444）"
+          diff -u "$TARGET.orig" "$TARGET" | head -150 || true
 
       - name: Configure Kernel
         shell: bash
@@ -573,11 +597,17 @@ jobs:
           # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
           scripts/config --file out/.config --disable DEBUG_INFO
           # 追加内核命令行（loglevel=8 → pstore 记下 pr_info，能看到 GLINK/RPMSG 探测）
+          # 注意：CMDLINE 里原本有 cgroup_disable=pressure，必须保留，只追加
           if [ -n "${{ inputs.extra_cmdline }}" ]; then
-            scripts/config --file out/.config \
-              --set-str CMDLINE "${{ inputs.extra_cmdline }}" \
-              --enable CMDLINE_EXTEND
-            echo "::notice title=内核命令行追加::${{ inputs.extra_cmdline }}"
+            OLD_CMDLINE="$(scripts/config --file out/.config --state CMDLINE 2>/dev/null || true)"
+            case "$OLD_CMDLINE" in
+              *"${{ inputs.extra_cmdline }}"*) NEW_CMDLINE="$OLD_CMDLINE" ;;
+              "")  NEW_CMDLINE="${{ inputs.extra_cmdline }}" ;;
+              *)   NEW_CMDLINE="$OLD_CMDLINE ${{ inputs.extra_cmdline }}" ;;
+            esac
+            scripts/config --file out/.config --set-str CMDLINE "$NEW_CMDLINE"
+            scripts/config --file out/.config --enable CMDLINE_EXTEND
+            scripts/config --file out/.config --disable CMDLINE_FORCE
           fi
 
           export PATH="$CLANG_DIR/bin:$PATH"
@@ -762,7 +792,8 @@ jobs:
         run: |
           set -euxo pipefail
           cd AnyKernel3
-          zip -r9 "$GITHUB_WORKSPACE/OPPO_K10x_A_5.4.254_KSU.zip" . \
+          ZIPNAME="OPPO_K10x_A_5.4.254_$( [ "${{ inputs.enable_ksu }}" = "true" ] && echo KSU || echo NoKSU )$( [ "${{ inputs.diag_patch }}" = "true" ] && echo _DIAG || echo ).zip"
+          zip -r9 "$GITHUB_WORKSPACE/$ZIPNAME" . \
             -x '.git/*' -x '.git/**' -x 'README.md' -x 'patch/*'
 
       - name: Upload Kernel Image
@@ -817,6 +848,12 @@ jobs:
             echo "::notice title=配置阶段报错::$(grep -nE '::error::|Error [0-9]+|No rule to make' "$CFG" | head -10 || echo '(无)')"
           else
             echo "::warning title=配置日志::config.log 不存在"
+          fi
+
+          # 3.6) 内核命令行最终值（读实际 out/.config，不是 echo）
+          CFGF="$BUILD_DIR/out/.config"
+          if [ -f "$CFGF" ]; then
+            echo "::notice title=内核命令行最终值::$(grep -E '^CONFIG_CMDLINE(=|_EXTEND|_FORCE|_FROM_BOOTLOADER)' "$CFGF" | tr '\n' ' | ')"
           fi
 
           # 4) 最终产物
