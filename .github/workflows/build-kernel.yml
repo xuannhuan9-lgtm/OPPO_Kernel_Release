@@ -99,6 +99,43 @@ name: "[A] OPPO K10x k10x_5g (5.4.233->254 + KernelSU-Next)"
 #     oppo/sm6375_u_14_oppo_reno9_a，需要时可切换。
 # ============================================================================
 
+# ── 输入项说明（GitHub 的 workflow_dispatch 解析器不接受 inputs: 块内出现注释，
+#    所以这些说明统一放在这里）──
+# 14. module_sig：模块签名校验开关。
+# 实测本树 include/linux/module.h 里 struct module 的 sig_ok 字段是
+# 【无条件存在】的（原厂注释：preserve ABI compatibility between kernels
+# without module signing enabled and signed modules），所以关掉 MODULE_SIG
+# 不改变任何结构体布局，对原厂 .ko 安全。
+# ★ 为什么建议 off：kernel/module.c 的 module_sig_check() 里，
+# -ENODATA（无签名）/ -ENOPKG / -ENOKEY 在非强制时被豁免，但
+# default: return err;  —— 签名验证失败(-EKEYREJECTED)即使没开强制
+# 也会【直接拒绝加载】。原厂 .ko 目前走 -ENODATA 豁免所以能加载，
+# 但整个关掉 MODULE_SIG 后这条路径根本不存在，更稳。
+# ── 面具识别（这两个是「面具显示未集成」的正解）──
+# 
+# 12. ksu_manager_package：KernelSU-Next 的 kernel/Kbuild 里，is_manager_apk()
+# 有两条判定路径：
+# (a) 定义了 KSU_MANAGER_PACKAGE  -> 直接比包名，不扫 /data/app（稳）
+# (b) 没定义                      -> 扫 /data/app + 校验硬编码签名哈希
+# KSU_NEXT_MANAGER_HASH=79e59011...
+# legacy 分支 2026-10-07 的提交 8869bd768d66 "pin manager package name"
+# 刚把 (b) 整段重写过（throne_tracker.c +148/-85，把
+# get_pkg_from_apk_path 换成 get_pkg_from_apk_dir_path）。
+# 在 ColorOS 14 的 /data/app/~~hash==/pkg-hash==/ 布局下这段扫描
+# 可能解析失败 -> 面具永远不被 crown -> Natives.isManager=false
+# -> 面具首页显示「未集成」（就是 zh-rCN 里的 home_failure）。
+# 填了这个包名，内核就完全跳过扫描，spoofed 版也能正常认。
+# 查包名：adb shell pm list packages | grep -i -E 'ksu|rifsxd|kernel'
+# ★ spoofed 版的包名是【随机】的：manager/spoof 用 /dev/urandom 生成
+# 三段 6 字母小写单词替换 com.rifsxd.ksunext，每个 release 都不同，
+# 没法写死。要填这个输入项必须先用 adb 查手机上实际装的包名。
+# 官方（非 spoofed）版固定是 com.rifsxd.ksunext。
+# ★ spoof 脚本【只改包名、不改签名】，两个变体同一个密钥，所以内核里
+# 硬编码的 KSU_NEXT_MANAGER_HASH=79e59011... 对两者都成立 ——
+# 签名校验不是问题，留空也能认。填包名主要是为了绕开 ColorOS 14
+# 那个脆弱的 /data/app 路径解析（throne_tracker.c 2026-10-07 重写过）。
+# 
+
 on:
   workflow_dispatch:
     inputs:
@@ -113,16 +150,6 @@ on:
           - kprobes
           - syscall_table
         default: kprobes
-      # 14. module_sig：模块签名校验开关。
-      #     实测本树 include/linux/module.h 里 struct module 的 sig_ok 字段是
-      #     【无条件存在】的（原厂注释：preserve ABI compatibility between kernels
-      #     without module signing enabled and signed modules），所以关掉 MODULE_SIG
-      #     不改变任何结构体布局，对原厂 .ko 安全。
-      #     ★ 为什么建议 off：kernel/module.c 的 module_sig_check() 里，
-      #       -ENODATA（无签名）/ -ENOPKG / -ENOKEY 在非强制时被豁免，但
-      #       default: return err;  —— 签名验证失败(-EKEYREJECTED)即使没开强制
-      #       也会【直接拒绝加载】。原厂 .ko 目前走 -ENODATA 豁免所以能加载，
-      #       但整个关掉 MODULE_SIG 后这条路径根本不存在，更稳。
       module_sig:
         description: '模块签名校验。off=彻底关掉（MODULE_SIG=n，module_sig_check 直接 return 0，推荐）；keep=保留校验代码但不强制（MODULE_SIG=y + FORCE=n，已验证能开机）'
         type: choice
@@ -163,34 +190,10 @@ on:
         type: boolean
         default: false
 
-      # ── 面具识别（这两个是「面具显示未集成」的正解）──
-      #
-      # 12. ksu_manager_package：KernelSU-Next 的 kernel/Kbuild 里，is_manager_apk()
-      #     有两条判定路径：
-      #       (a) 定义了 KSU_MANAGER_PACKAGE  -> 直接比包名，不扫 /data/app（稳）
-      #       (b) 没定义                      -> 扫 /data/app + 校验硬编码签名哈希
-      #                                          KSU_NEXT_MANAGER_HASH=79e59011...
-      #     legacy 分支 2026-10-07 的提交 8869bd768d66 "pin manager package name"
-      #     刚把 (b) 整段重写过（throne_tracker.c +148/-85，把
-      #     get_pkg_from_apk_path 换成 get_pkg_from_apk_dir_path）。
-      #     在 ColorOS 14 的 /data/app/~~hash==/pkg-hash==/ 布局下这段扫描
-      #     可能解析失败 -> 面具永远不被 crown -> Natives.isManager=false
-      #     -> 面具首页显示「未集成」（就是 zh-rCN 里的 home_failure）。
-      #     填了这个包名，内核就完全跳过扫描，spoofed 版也能正常认。
-      #     查包名：adb shell pm list packages | grep -i -E 'ksu|rifsxd|kernel'
       ksu_manager_package:
         description: 'KernelSU-Next 面具包名。留空=内核自动扫描认领（推荐）。spoofed 版包名随机，要填得先用 adb 查真实包名'
         type: string
         default: ''
-      #     ★ spoofed 版的包名是【随机】的：manager/spoof 用 /dev/urandom 生成
-      #       三段 6 字母小写单词替换 com.rifsxd.ksunext，每个 release 都不同，
-      #       没法写死。要填这个输入项必须先用 adb 查手机上实际装的包名。
-      #       官方（非 spoofed）版固定是 com.rifsxd.ksunext。
-      #     ★ spoof 脚本【只改包名、不改签名】，两个变体同一个密钥，所以内核里
-      #       硬编码的 KSU_NEXT_MANAGER_HASH=79e59011... 对两者都成立 ——
-      #       签名校验不是问题，留空也能认。填包名主要是为了绕开 ColorOS 14
-      #       那个脆弱的 /data/app 路径解析（throne_tracker.c 2026-10-07 重写过）。
-      #
 
 permissions:
   contents: read
