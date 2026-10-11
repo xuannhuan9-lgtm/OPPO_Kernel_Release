@@ -5,7 +5,7 @@
 #   依据     : 那个能开机的非官方内核版本串 5.4.233-qgki-unofficial-gf81d548c5043-dirty
 #   KernelSU : 关闭（先确认内核能开机，再开）
 #   赌的是   : 你之前卡二屏，是因为源码 commit 太旧（旧了 166 个 commit）
-#   产出 zip : OPPO_K10x_A_5.4.254_KSU.zip
+#   产出 zip : OPPO_K10x_A_5.4.254_{KSU|NoKSU}[_DIAG].zip
 # ============================================================================
 name: "[A] OPPO K10x k10x_5g (5.4.233->254 + KernelSU-Next)"
 
@@ -71,7 +71,7 @@ on:
   workflow_dispatch:
     inputs:
       enable_ksu:
-        description: '是否集成 KernelSU-Next（关掉可做对照构建，定位卡二屏）'
+        description: '是否集成 KernelSU-Next（官方 legacy 流程）。默认 true。注意：FolkPatch/APatch 也是内核级 root，与 KSU 同开会冲突，用它们取 root 读日志时请设 false'
         type: boolean
         default: true
       ksu_hook:
@@ -85,14 +85,30 @@ on:
         description: '钉死内核版本串后缀（从手机「设置→关于手机→内核版本」抄，形如 -qgki-g1a2b3c4d；留空则不钉）'
         type: string
         default: '-qgki-g6818c821e42d'
-      config_source:
-        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig；official = 用源码树官方三件套合并'
+      extra_cmdline:
+        description: '追加到内核命令行的参数（用 CONFIG_CMDLINE_EXTEND）。默认 loglevel=8 让 pstore 记下 pr_info'
+        required: false
+        default: 'loglevel=8'
+      force_builtin:
+        description: '把 ADSP/PIL/GLINK 那批 vendor 驱动强制 =y（official 路线必须开，否则链接失败）'
         required: false
         type: choice
-        default: 'official'
+        default: 'true'
+        options: ['true', 'false']
+      diag_patch:
+        description: '应用 adsprpc 诊断补丁：创建世界可读的 /proc/adsprpc_diag（卡二屏时 adb shell cat /proc/adsprpc_diag 直接看 rpdev）'
+        required: false
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+      config_source:
+        description: '配置来源。dump = 用手机 dump 出的 k10x_defconfig（已验证可编过）；official = 源码树官方三件套 + force_builtin 覆盖（实验性）'
+        required: false
+        type: choice
+        default: 'dump'
         options:
-          - 'official'
           - 'dump'
+          - 'official'
       build_dtbs:
         description: '是否编译 DTB（建议开，用于和 stock DTB 比对）'
         type: boolean
@@ -146,6 +162,9 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 2G
       CCACHE_COMPRESS: '1'
+      # Droidspaces kABI 补丁脚本（base64 内嵌，避免 YAML 多行缩进问题）。
+      # 必须放 job 级 env：步骤 run 里的变量跨步骤看不到。
+      KABI_B64: "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKRHJvaWRzcGFjZXMga0FCSSDooaXkuIHvvIg1LjQgR0tJIOmAgumFjeeJiO+8iQo9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09CuWumOaWueihpeS4gSAwMDHvvIhzeXN2aXBj77yJ6IO955u05o6l5omT77yM5L2GIDAwMu+8iHBvc2l4X21xdWV1Ze+8ieS+nei1lgpBTkRST0lEX09FTV9EQVRBX0FSUkFZIOi/meS4quWujyDigJTigJQgT1BQTyDov5nmo7XmoJHph4zmsqHmnInvvIzmiYDku6XmlLnmiJDohJrmnKzmiYvlt6XmlLnjgIIKCuWOn+eQhu+8muaKiuaWsOWtl+auteWhnui/myBBbmRyb2lkIOmihOeVmeeahCB1NjQgcGFkZGluZyDmp73kvY3vvIjlgZrmiJAgdW5pb27vvInvvIwKICAgICAg6L+Z5qC3IHN0cnVjdCB0YXNrX3N0cnVjdCAvIHN0cnVjdCB1c2VyX3N0cnVjdCDnmoQqKuWkp+Wwj+WSjOW4g+WxgOmDveS4jeWPmCoq77yMCiAgICAgIOWOn+WOgiB2ZW5kb3Ig5qih5Z2X5LuN54S26IO95oyJ6ICB5YGP56e76YeP6K6/6Zeu5a2X5q6144CCCiAgICAgIOmFjeWQiCBfX0dFTktTWU1TX18g5LiLIF9BTkRST0lEX0tBQklfUkVQTEFDRSDpgIDljJbmiJAgX29yaWfvvIwKICAgICAg6L+eIGdlbmtzeW1zIOeul+WHuuadpeeahCBDUkMg6YO95LiN5Y+Y44CCCiIiIgppbXBvcnQgaW8sIHJlLCBzeXMsIG9zCgpkZWYgcmVhZChwKToKICAgIHJldHVybiBpby5vcGVuKHAsIGVuY29kaW5nPSJ1dGYtOCIsIGVycm9ycz0ic3Vycm9nYXRlZXNjYXBlIikucmVhZCgpCgpkZWYgd3JpdGUocCwgcyk6CiAgICBpby5vcGVuKHAsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IiwgZXJyb3JzPSJzdXJyb2dhdGVlc2NhcGUiKS53cml0ZShzKQoKZGVmIHN1Yl9vbmNlKHRleHQsIHBhdHRlcm4sIHJlcGwsIHdoYXQpOgogICAgbmV3LCBuID0gcmUuc3VibihwYXR0ZXJuLCByZXBsLCB0ZXh0LCBjb3VudD0xLCBmbGFncz1yZS5NKQogICAgaWYgbiAhPSAxOgogICAgICAgIHByaW50KGYiICDinJcge3doYXR9OiDplJrngrnljLnphY0ge259IOasoe+8iOacn+acmyAxIOasoe+8iSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICByZXR1cm4gTm9uZQogICAgcHJpbnQoZiIgIOKckyB7d2hhdH0iKQogICAgcmV0dXJuIG5ldwoKZGVmIHBhdGNoX3NjaGVkX2gocm9vdCk6CiAgICAiIiIwMDE6IGluY2x1ZGUvbGludXgvc2NoZWQuaCDigJTigJQgU1lTVklQQyDnlKggQUJJIHBhZGRpbmciIiIKICAgIHAgPSBvcy5wYXRoLmpvaW4ocm9vdCwgImluY2x1ZGUvbGludXgvc2NoZWQuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDmioogc3lzdnNlbSAvIHN5c3ZzaG0g5LuOIHRhc2tfc3RydWN0IOS4u+S9k+mHjOaMqui1sAogICAgcyA9IHN1Yl9vbmNlKAogICAgICAgIHMsCiAgICAgICAgcideI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidbIFx0XSpzdHJ1Y3Qgc3lzdl9zZW1bIFx0XStzeXN2c2VtO1xuJwogICAgICAgIHInWyBcdF0qc3RydWN0IHN5c3Zfc2htWyBcdF0rc3lzdnNobTtcbicKICAgICAgICByJyNlbmRpZlxuJywKICAgICAgICAnLyogSzEweC9Ecm9pZHNwYWNlczogc3lzdnNlbS9zeXN2c2htIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZyDph4zvvIxcbicKICAgICAgICAnICog6L+Z5qC35byA5ZCvIENPTkZJR19TWVNWSVBDIOS4jeS8muenu+WKqCB0YXNrX3N0cnVjdCDlkI7pnaLku7vkvZXlrZfmrrXnmoTlgY/np7vph4/jgIIgKi9cbicsCiAgICAgICAgInNjaGVkLmgg4pGgIOenu+i1sCBzeXN2c2VtL3N5c3ZzaG0iKQogICAgaWYgcyBpcyBOb25lOiByZXR1cm4gRmFsc2UKCiAgICAjIOKRoSDmioogUkVTRVJWRSg2KSg3KSg4KSDmjaLmiJAgS0FCSV9VU0UgLyBLQUJJX1JFUExBQ0UKICAgICMgICAg5rOo5oSP77ya6L+Z5Z2X5ZyoIHRhc2tfc3RydWN0IOacq+Wwvu+8jOWJjemdoue0p+i3n+edgCBSRVNFUlZFKDEpLi4oNSkKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDZcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCg3XCk7XG4nCiAgICAgICAgcidbIFx0XSpBTkRST0lEX0tBQklfUkVTRVJWRVwoOFwpO1xuJywKICAgICAgICByJ1wxI2lmZGVmIENPTkZJR19TWVNWSVBDXG4nCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IOWkjeeUqCAzIOS4qiB1NjQgcGFkZGluZyDmp71cbicKICAgICAgICByJ1wxICogICBzbG90NiAgICAgID0gOCDlrZfoioIgIDwtIHN0cnVjdCBzeXN2X3NlbSAgKDEg5Liq5oyH6ZKIKVxuJwogICAgICAgIHInXDEgKiAgIHNsb3Q3KzggICAgPSAxNiDlrZfoioIgPC0gc3RydWN0IHN5c3Zfc2htICAoc3RydWN0IGxpc3RfaGVhZCkgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSg2LCBzdHJ1Y3Qgc3lzdl9zZW0gc3lzdnNlbSk7XG4nCiAgICAgICAgcidcMV9BTkRST0lEX0tBQklfUkVQTEFDRShBTkRST0lEX0tBQklfUkVTRVJWRSg3KTsgQU5EUk9JRF9LQUJJX1JFU0VSVkUoOCksIHN0cnVjdCBzeXN2X3NobSBzeXN2c2htKTtcbicKICAgICAgICByJ1wxI2Vsc2VcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoNik7XG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDcpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSg4KTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJzY2hlZC5oIOKRoSBSRVNFUlZFKDYvNy84KSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgc2NoZWQuaCDmsqHlj5jljJYiLCBmaWxlPXN5cy5zdGRlcnIpOyByZXR1cm4gRmFsc2UKICAgIHdyaXRlKHAsIHMpCiAgICByZXR1cm4gVHJ1ZQoKZGVmIHBhdGNoX3VzZXJfaChyb290KToKICAgICIiIjAwMjogaW5jbHVkZS9saW51eC9zY2hlZC91c2VyLmgg4oCU4oCUIFBPU0lYX01RVUVVRSDnlKggQUJJIHBhZGRpbmcKICAgICAgIOWumOaWueihpeS4geWkmuS4gOihjCBBTkRST0lEX09FTV9EQVRBX0FSUkFZKDEsIDIp77yM5pys5qCR5rKh5pyJ6L+Z5Liq5a6P77yM5Y675o6J44CCIiIiCiAgICBwID0gb3MucGF0aC5qb2luKHJvb3QsICJpbmNsdWRlL2xpbnV4L3NjaGVkL3VzZXIuaCIpCiAgICBzID0gcmVhZChwKQogICAgb3JpZyA9IHMKCiAgICAjIOKRoCDms6jph4rmjonkuLvkvZPph4znmoQgbXFfYnl0ZXMKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopdW5zaWduZWQgbG9uZyBtcV9ieXRlcztbIFx0XSovXCogSG93IG1hbnkgYnl0ZXMgY2FuIGJlIGFsbG9jYXRlZCB0byBtcXVldWVcPyBcKi9cbicsCiAgICAgICAgcidcMS8qIEsxMHgvRHJvaWRzcGFjZXM6IG1xX2J5dGVzIOW3suenu+WIsOaWh+S7tuacq+WwvueahCBBQkkgcGFkZGluZ++8iHNsb3Qx77yJ77yMXG4nCiAgICAgICAgcidcMSAqIOi/memHjOW/hemhu+eVmeepuu+8jOWQpuWImSBzdHJ1Y3QgdXNlcl9zdHJ1Y3Qg5aSn5bCP5Lya5Y+Y44CCICovXG4nLAogICAgICAgICJ1c2VyLmgg4pGgIOenu+i1sCBtcV9ieXRlcyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgICMg4pGhIFJFU0VSVkUoMSkoMikgLT4gS0FCSV9VU0UoMSwgLi4uKSArIFJFU0VSVkUoMikKICAgIHMgPSBzdWJfb25jZSgKICAgICAgICBzLAogICAgICAgIHInXihbIFx0XSopQU5EUk9JRF9LQUJJX1JFU0VSVkVcKDFcKTtcbicKICAgICAgICByJ1sgXHRdKkFORFJPSURfS0FCSV9SRVNFUlZFXCgyXCk7XG4nLAogICAgICAgIHInXDEjaWYgZGVmaW5lZChDT05GSUdfUE9TSVhfTVFVRVVFKVxuJwogICAgICAgIHInXDEvKiBLMTB4L0Ryb2lkc3BhY2VzOiBzbG90MSA9IDgg5a2X6IqCIDwtIHVuc2lnbmVkIGxvbmcgbXFfYnl0ZXMgKi9cbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1VTRSgxLCB1bnNpZ25lZCBsb25nIG1xX2J5dGVzKTtcbicKICAgICAgICByJ1wxQU5EUk9JRF9LQUJJX1JFU0VSVkUoMik7XG4nCiAgICAgICAgcidcMSNlbHNlXG4nCiAgICAgICAgcidcMUFORFJPSURfS0FCSV9SRVNFUlZFKDEpO1xuJwogICAgICAgIHInXDFBTkRST0lEX0tBQklfUkVTRVJWRSgyKTtcbicKICAgICAgICByJ1wxI2VuZGlmXG4nLAogICAgICAgICJ1c2VyLmgg4pGhIFJFU0VSVkUoMS8yKSAtPiBBQkkgcGFkZGluZyIpCiAgICBpZiBzIGlzIE5vbmU6IHJldHVybiBGYWxzZQoKICAgIGlmIHMgPT0gb3JpZzoKICAgICAgICBwcmludCgiICDinJcgdXNlci5oIOayoeWPmOWMliIsIGZpbGU9c3lzLnN0ZGVycik7IHJldHVybiBGYWxzZQogICAgd3JpdGUocCwgcykKICAgIHJldHVybiBUcnVlCgpkZWYgbWFpbigpOgogICAgcm9vdCA9IHN5cy5hcmd2WzFdIGlmIGxlbihzeXMuYXJndikgPiAxIGVsc2UgIi4iCiAgICBwcmludChmIj09PT09IERyb2lkc3BhY2VzIGtBQkkg6KGl5LiBIC0+IHtyb290fSA9PT09PSIpCiAgICBvazEgPSBwYXRjaF9zY2hlZF9oKHJvb3QpCiAgICBvazIgPSBwYXRjaF91c2VyX2gocm9vdCkKICAgIGlmIG5vdCAob2sxIGFuZCBvazIpOgogICAgICAgIHByaW50KCI6OmVycm9yOjprQUJJIOihpeS4geWksei0pSIsIGZpbGU9c3lzLnN0ZGVycikKICAgICAgICBzeXMuZXhpdCgxKQogICAgcHJpbnQoIj09PT09IGtBQkkg6KGl5LiB5YWo6YOo5a6M5oiQID09PT09IikKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBtYWluKCkK"
 
     steps:
       - name: Checkout Workflow Repository
@@ -413,6 +432,7 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Integrate KernelSU-Next (legacy)
         shell: bash
+        if: ${{ inputs.enable_ksu == 'true' }}
         run: |
           set -euxo pipefail
           cd "$BUILD_DIR"
@@ -449,6 +469,105 @@ jobs:
           sudo swapon /swapfile
           free -h
 
+      - name: Apply Droidspaces kABI Patches (5.4 GKI safe)
+        shell: bash
+        run: |
+          set -e
+          # Droidspaces 官方要求：5.4 属于 GKI 路线，开启 SYSVIPC / POSIX_MQUEUE
+          # 会把新字段插进 struct task_struct / struct user_struct 的中间，
+          # 导致后面所有字段偏移量平移 -> 原厂 vendor 模块按老偏移读 -> 崩溃/无限重启。
+          # 官方补丁把新字段塞进 Android 预留的 u64 ABI padding 槽（做成 union），
+          # 结构体大小和布局都不变。
+          #   slot6   =  8 字节 <- struct sysv_sem (1 个指针)
+          #   slot7+8 = 16 字节 <- struct sysv_shm (struct list_head)
+          #   user slot1 = 8 字节 <- unsigned long mq_bytes
+          # 官方 002 补丁多一行 ANDROID_OEM_DATA_ARRAY(1,2)，OPPO 这棵树没这个宏，
+          # 所以用脚本改而不是 patch -p1。
+          echo "$KABI_B64" | base64 -d > /tmp/kabi_patch.py
+          python3 /tmp/kabi_patch.py "$BUILD_DIR"
+          echo
+          echo "===== 补丁后 sched.h 关键片段 ====="
+          grep -n -B1 -A4 'ANDROID_KABI_USE(6' "$BUILD_DIR/include/linux/sched.h" || true
+          echo
+          echo "===== 补丁后 user.h 关键片段 ====="
+          grep -n -B1 -A4 'ANDROID_KABI_USE(1' "$BUILD_DIR/include/linux/sched/user.h" || true
+          echo
+          if ! grep -q 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem)' "$BUILD_DIR/include/linux/sched.h"; then
+            echo "::error::sched.h 的 ABI padding 没打上"; exit 1
+          fi
+          if ! grep -q 'ANDROID_KABI_USE(1, unsigned long mq_bytes)' "$BUILD_DIR/include/linux/sched/user.h"; then
+            echo "::error::user.h 的 ABI padding 没打上"; exit 1
+          fi
+          echo "::notice title=Droidspaces kABI 补丁::已应用（SYSVIPC + POSIX_MQUEUE 走 ABI padding，task_struct 布局不变）"
+
+      - name: Integrate NoMount (KernelSU metamodule, built-in)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+          # NoMount 官方 kernel/README.md 的 Method 1：跑它的 setup.sh
+          # 5.4 是 legacy 内核，官方预编译 LKM 用不了，必须集成进源码（built-in）。
+          # -f：404/5xx 直接失败退出，不然会把 HTML 错误页灌进 bash 里报一堆怪错
+          curl -LSsf https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s dev
+          echo
+          echo "===== NoMount 集成结果 ====="
+          ls -la fs/nomount
+          test -f fs/nomount/nomount.c || { echo '::error::fs/nomount/nomount.c 不存在'; exit 1; }
+          grep -n 'nomount' fs/Makefile || { echo '::error::fs/Makefile 没改'; exit 1; }
+          grep -n 'fs/nomount/Kconfig' fs/Kconfig || { echo '::error::fs/Kconfig 没改'; exit 1; }
+          echo
+          git -C NoMount log -1 --format='%H %s' || true
+          echo "::notice title=NoMount::已集成（fs/nomount -> NoMount/kernel/src，CONFIG_NOMOUNT 见配置阶段）"
+
+      - name: Apply adsprpc Diagnostic Patch
+        shell: bash
+        if: ${{ inputs.diag_patch == 'true' }}
+        run: |
+          set -e
+          echo "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIC0qLSBjb2Rpbmc6IHV0Zi04IC0qLQojIEsxMHgg6K+K5pat6KGl5LiB77ya57uZIGFkc3BycGMuYyDliqDkuIDkuKrkuJbnlYzlj6/or7vnmoQgL3Byb2MvYWRzcHJwY19kaWFnCmltcG9ydCBzeXMsIGlvCgpwYXRoID0gc3lzLmFyZ3ZbMV0Kc3JjID0gaW8ub3BlbihwYXRoLCBlbmNvZGluZz0idXRmLTgiLCBlcnJvcnM9InN1cnJvZ2F0ZWVzY2FwZSIpLnJlYWQoKQpvcmlnX2xlbiA9IGxlbihzcmMpCgpDT1VOVEVSUyA9ICdcbi8qID09PT09IEsxMHgg6K+K5pat6KGl5LiBID09PT09ICovXG5zdGF0aWMgYXRvbWljX3QgYWRzcHJwY19wcm9iZV9jb3VudCAgICAgICAgPSBBVE9NSUNfSU5JVCgwKTtcbnN0YXRpYyBhdG9taWNfdCBhZHNwcnBjX3JwbXNnX3Byb2JlX2NvdW50ICA9IEFUT01JQ19JTklUKDApO1xuc3RhdGljIGF0b21pY190IGFkc3BycGNfcnBtc2dfcmVtb3ZlX2NvdW50ID0gQVRPTUlDX0lOSVQoMCk7XG5zdGF0aWMgY2hhciAgICAgYWRzcHJwY19sYXN0X3JwbXNnX25vZGVbODBdID0gIm5vbmUiO1xuc3RhdGljIGNoYXIgICAgIGFkc3BycGNfbGFzdF9ycG1zZ19mYWlsWzgwXSA9ICJub25lIjtcbicKRElBRyAgICAgPSAnLyogPT09PT0gSzEweCDor4rmlq3ooaXkuIHvvJovcHJvYy9hZHNwcnBjX2RpYWfvvIgwNDQ077yM5pmu6YCa55So5oi35Y+v6K+777yJPT09PT0gKi9cbnN0YXRpYyBpbnQgYWRzcHJwY19kaWFnX3Nob3coc3RydWN0IHNlcV9maWxlICptLCB2b2lkICp2KVxue1xuXHRpbnQgaTtcblx0c3RydWN0IGZhc3RycGNfYXBwcyAqbWUgPSAmZ2ZhO1xuXG5cdHNlcV9wcmludGYobSwgImFkc3BycGNfcHJvYmVfY291bnQgICAgICAgID0gJWRcXG4iLFxuXHRcdCAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3Byb2JlX2NvdW50KSk7XG5cdHNlcV9wcmludGYobSwgImFkc3BycGNfcnBtc2dfcHJvYmVfY291bnQgID0gJWRcXG4iLFxuXHRcdCAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3JwbXNnX3Byb2JlX2NvdW50KSk7XG5cdHNlcV9wcmludGYobSwgImFkc3BycGNfcnBtc2dfcmVtb3ZlX2NvdW50ID0gJWRcXG4iLFxuXHRcdCAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3JwbXNnX3JlbW92ZV9jb3VudCkpO1xuXHRzZXFfcHJpbnRmKG0sICJsYXN0X3JwbXNnX25vZGUgICAgICAgICAgICA9ICVzXFxuIiwgYWRzcHJwY19sYXN0X3JwbXNnX25vZGUpO1xuXHRzZXFfcHJpbnRmKG0sICJsYXN0X3JwbXNnX2ZhaWwgICAgICAgICAgICA9ICVzXFxuIiwgYWRzcHJwY19sYXN0X3JwbXNnX2ZhaWwpO1xuXHRzZXFfcHJpbnRmKG0sICJycG1zZ19yZWdpc3RlciAgICAgICAgICAgICA9ICVkXFxuIiwgbWUtPnJwbXNnX3JlZ2lzdGVyKTtcblx0c2VxX3ByaW50ZihtLCAiTlVNX0NIQU5ORUxTICAgICAgICAgICAgICAgPSAlZFxcbiIsIE5VTV9DSEFOTkVMUyk7XG5cdHNlcV9wcmludGYobSwgIm1lLT5jaGFubmVsKHB0cikgICAgICAgICAgID0gMHglcFxcbiIsIG1lLT5jaGFubmVsKTtcblx0aWYgKCFtZS0+Y2hhbm5lbCkge1xuXHRcdHNlcV9wcmludGYobSwgIlxcbioqKiBtZS0+Y2hhbm5lbCDku43mmK8gTlVMTO+8mumpseWKqOi/mOayoeWIneWni+WMluWujCAqKipcXG4iKTtcblx0fSBlbHNlIHtcblx0XHRzZXFfcHJpbnRmKG0sICJcXG4lLTVzICUtOHMgJS0xOHMgJS0xNHMgJS03cyAlLTEwc1xcbiIsXG5cdFx0XHQgICAiY2lkIiwgInN1YnN5cyIsICJycGRldiIsICJpc3N1YnN5c3RlbXVwIiwgInNlY3VyZSIsICJzc3Jjb3VudCIpO1xuXHRcdGZvciAoaSA9IDA7IGkgPCBOVU1fQ0hBTk5FTFM7IGkrKykge1xuXHRcdFx0c2VxX3ByaW50ZihtLCAiJS01ZCAlLThzIDB4JS0xNnAgJS0xNGQgJS03ZCAlLTEwbGx1XFxuIixcblx0XHRcdFx0ICAgaSwgZ2NpbmZvW2ldLnN1YnN5cyA/IGdjaW5mb1tpXS5zdWJzeXMgOiAiPyIsXG5cdFx0XHRcdCAgIG1lLT5jaGFubmVsW2ldLnJwZGV2LFxuXHRcdFx0XHQgICBtZS0+Y2hhbm5lbFtpXS5pc3N1YnN5c3RlbXVwLFxuXHRcdFx0XHQgICBtZS0+Y2hhbm5lbFtpXS5zZWN1cmUsXG5cdFx0XHRcdCAgICh1bnNpZ25lZCBsb25nIGxvbmcpbWUtPmNoYW5uZWxbaV0uc3NyY291bnQpO1xuXHRcdH1cblx0fVxuXHRzZXFfcHJpbnRmKG0sICJcXG4iKTtcblx0Zm9yIChpID0gMDsgaSA8IE5VTV9DSEFOTkVMUzsgaSsrKSB7XG5cdFx0c2VxX3ByaW50ZihtLCAiZ2NpbmZvWyVkXS5uYW1lPSVzIHN1YnN5cz0lcyBycGRldj0weCVwIGlzc3Vic3lzdGVtdXA9JWRcXG4iLFxuXHRcdFx0ICAgaSxcblx0XHRcdCAgIGdjaW5mb1tpXS5uYW1lID8gZ2NpbmZvW2ldLm5hbWUgOiAiPyIsXG5cdFx0XHQgICBnY2luZm9baV0uc3Vic3lzID8gZ2NpbmZvW2ldLnN1YnN5cyA6ICI/Iixcblx0XHRcdCAgIGdjaW5mb1tpXS5ycGRldixcblx0XHRcdCAgIGdjaW5mb1tpXS5pc3N1YnN5c3RlbXVwKTtcblx0fVxuXHRyZXR1cm4gMDtcbn1cblxuc3RhdGljIGludCBhZHNwcnBjX2RpYWdfb3BlbihzdHJ1Y3QgaW5vZGUgKmlub2RlLCBzdHJ1Y3QgZmlsZSAqZmlsZSlcbntcblx0cmV0dXJuIHNpbmdsZV9vcGVuKGZpbGUsIGFkc3BycGNfZGlhZ19zaG93LCBOVUxMKTtcbn1cblxuc3RhdGljIGNvbnN0IHN0cnVjdCBmaWxlX29wZXJhdGlvbnMgYWRzcHJwY19kaWFnX2ZvcHMgPSB7XG5cdC5vcGVuICAgID0gYWRzcHJwY19kaWFnX29wZW4sXG5cdC5yZWFkICAgID0gc2VxX3JlYWQsXG5cdC5sbHNlZWsgID0gc2VxX2xzZWVrLFxuXHQucmVsZWFzZSA9IHNpbmdsZV9yZWxlYXNlLFxufTtcblxuc3RhdGljIHN0cnVjdCBwcm9jX2Rpcl9lbnRyeSAqYWRzcHJwY19kaWFnX2VudHJ5O1xuXG5zdGF0aWMgdm9pZCBhZHNwcnBjX2RpYWdfY3JlYXRlKHZvaWQpXG57XG5cdGlmICghYWRzcHJwY19kaWFnX2VudHJ5KVxuXHRcdGFkc3BycGNfZGlhZ19lbnRyeSA9IHByb2NfY3JlYXRlKCJhZHNwcnBjX2RpYWciLCAwNDQ0LCBOVUxMLFxuXHRcdFx0XHRcdFx0ICZhZHNwcnBjX2RpYWdfZm9wcyk7XG5cdHByX2VycigiYWRzcHJwYy1kaWFnOiAvcHJvYy9hZHNwcnBjX2RpYWcgJXNcXG4iLFxuXHQgICAgICAgYWRzcHJwY19kaWFnX2VudHJ5ID8gImNyZWF0ZWQiIDogIkZBSUxFRCIpO1xufVxuXG4nCgpkZWYgcmVwKG9sZCwgbmV3LCB0YWcpOgogICAgZ2xvYmFsIHNyYwogICAgYXNzZXJ0IG9sZCBpbiBzcmMsICLplJrngrnmsqHmib7liLA6ICIgKyB0YWcKICAgIHNyYyA9IHNyYy5yZXBsYWNlKG9sZCwgbmV3LCAxKQoKIyAxKSDlpLTmlofku7YKaWYgIiNpbmNsdWRlIDxsaW51eC9zZXFfZmlsZS5oPiIgbm90IGluIHNyYzoKICAgIHJlcCgiI2luY2x1ZGUgPGxpbnV4L3JwbXNnLmg+IiwKICAgICAgICAiI2luY2x1ZGUgPGxpbnV4L3JwbXNnLmg+XG4jaW5jbHVkZSA8bGludXgvcHJvY19mcy5oPlxuI2luY2x1ZGUgPGxpbnV4L3NlcV9maWxlLmg+IiwKICAgICAgICAicnBtc2cuaCIpCgojIDIpIOiuoeaVsOWZqAppZiAiYWRzcHJwY19ycG1zZ19wcm9iZV9jb3VudCIgbm90IGluIHNyYzoKICAgIHJlcCgiI2RlZmluZSBSSF9DSUQgQURTUF9ET01BSU5fSUQiLAogICAgICAgICIjZGVmaW5lIFJIX0NJRCBBRFNQX0RPTUFJTl9JRFxuIiArIENPVU5URVJTLCAiUkhfQ0lEIikKCiMgMykgcnBtc2dfcHJvYmUg5aS06YOoCnJlcCgiIiJzdGF0aWMgaW50IGZhc3RycGNfcnBtc2dfcHJvYmUoc3RydWN0IHJwbXNnX2RldmljZSAqcnBkZXYpCnsKCWludCBlcnIgPSAwOwoJaW50IGNpZCA9IC0xOwoKCVZFUklGWShlcnIsICFJU19FUlJfT1JfTlVMTChycGRldikpOwoJaWYgKGVycikKCQlyZXR1cm4gLUVOT0RFVjsKIiIiLCAnc3RhdGljIGludCBmYXN0cnBjX3JwbXNnX3Byb2JlKHN0cnVjdCBycG1zZ19kZXZpY2UgKnJwZGV2KVxue1xuXHRpbnQgZXJyID0gMDtcblx0aW50IGNpZCA9IC0xO1xuXG5cdGF0b21pY19pbmMoJmFkc3BycGNfcnBtc2dfcHJvYmVfY291bnQpO1xuXHRpZiAoIUlTX0VSUl9PUl9OVUxMKHJwZGV2KSAmJiBycGRldi0+ZGV2LnBhcmVudCAmJlxuXHQgICAgcnBkZXYtPmRldi5wYXJlbnQtPm9mX25vZGUpXG5cdFx0c25wcmludGYoYWRzcHJwY19sYXN0X3JwbXNnX25vZGUsIHNpemVvZihhZHNwcnBjX2xhc3RfcnBtc2dfbm9kZSksXG5cdFx0XHQgIiVzIiwgcnBkZXYtPmRldi5wYXJlbnQtPm9mX25vZGUtPm5hbWUpO1xuXHRwcl9lcnIoImFkc3BycGMtZGlhZzogcnBtc2dfcHJvYmUgY2FsbGVkIG49JWQgbm9kZT0lc1xcbiIsXG5cdCAgICAgICBhdG9taWNfcmVhZCgmYWRzcHJwY19ycG1zZ19wcm9iZV9jb3VudCksIGFkc3BycGNfbGFzdF9ycG1zZ19ub2RlKTtcblxuXHRWRVJJRlkoZXJyLCAhSVNfRVJSX09SX05VTEwocnBkZXYpKTtcblx0aWYgKGVycikge1xuXHRcdHNucHJpbnRmKGFkc3BycGNfbGFzdF9ycG1zZ19mYWlsLCBzaXplb2YoYWRzcHJwY19sYXN0X3JwbXNnX2ZhaWwpLFxuXHRcdFx0ICJycGRldiBOVUxML0VSUiIpO1xuXHRcdHJldHVybiAtRU5PREVWO1xuXHR9XG4nLCAicnBtc2dfcHJvYmUgaGVhZCIpCgojIDQpIHJwbXNnX3Byb2JlIOWwvumDqApyZXAoIiIiCWlmIChlcnIpCgkJQURTUFJQQ19FUlIoInJwbXNnIHByb2JlIG9mICVzIGNpZCAlZCBmYWlsZWRcXG4iLAoJCQlycGRldi0+ZGV2LnBhcmVudC0+b2Zfbm9kZS0+bmFtZSwgY2lkKTsKCXJldHVybiBlcnI7Cn0iIiIsICdcdGlmIChlcnIpIHtcblx0XHRzbnByaW50ZihhZHNwcnBjX2xhc3RfcnBtc2dfZmFpbCwgc2l6ZW9mKGFkc3BycGNfbGFzdF9ycG1zZ19mYWlsKSxcblx0XHRcdCAiY2lkPSVkIG91dCBvZiByYW5nZSBub2RlPSVzIiwgY2lkLCBhZHNwcnBjX2xhc3RfcnBtc2dfbm9kZSk7XG5cdFx0cHJfZXJyKCJhZHNwcnBjLWRpYWc6IHJwbXNnIHByb2JlIEZBSUxFRCBjaWQ9JWQgbm9kZT0lc1xcbiIsXG5cdFx0ICAgICAgIGNpZCwgYWRzcHJwY19sYXN0X3JwbXNnX25vZGUpO1xuXHR9IGVsc2Uge1xuXHRcdHByX2VycigiYWRzcHJwYy1kaWFnOiBycG1zZyBwcm9iZSBPSyBjaWQ9JWQgbm9kZT0lc1xcbiIsXG5cdFx0ICAgICAgIGNpZCwgYWRzcHJwY19sYXN0X3JwbXNnX25vZGUpO1xuXHR9XG5cdHJldHVybiBlcnI7XG59JywgInJwbXNnX3Byb2JlIHRhaWwiKQoKIyA1KSByZW1vdmUg6K6h5pWwCnJlcCgiIiIJbXV0ZXhfbG9jaygmZ2NpbmZvW2NpZF0ucnBtc2dfbXV0ZXgpOwoJZ2NpbmZvW2NpZF0ucnBkZXYgPSBOVUxMOyIiIiwKICAgICIiIglhdG9taWNfaW5jKCZhZHNwcnBjX3JwbXNnX3JlbW92ZV9jb3VudCk7CgltdXRleF9sb2NrKCZnY2luZm9bY2lkXS5ycG1zZ19tdXRleCk7CglnY2luZm9bY2lkXS5ycGRldiA9IE5VTEw7IiIiLCAicmVtb3ZlIikKCiMgNikgZGlhZyDlh73mlbAgKyDlnKggZmFzdHJwY19wcm9iZSDph4zliJvlu7oKcmVwKCJzdGF0aWMgaW50IGZhc3RycGNfcHJvYmUoc3RydWN0IHBsYXRmb3JtX2RldmljZSAqcGRldilcbnsiLAogICAgRElBRyArICJzdGF0aWMgaW50IGZhc3RycGNfcHJvYmUoc3RydWN0IHBsYXRmb3JtX2RldmljZSAqcGRldilcbnsiLCAiZmFzdHJwY19wcm9iZSIpCgpyZXAoIiIiCWludCByZXQgPSAwOwoJdWludDMyX3Qgc2VjdXJlX2RvbWFpbnMgPSAwOwoKCWlmIChvZl9kZXZpY2VfaXNfY29tcGF0aWJsZShkZXYtPm9mX25vZGUsCgkJCQkJInFjb20sbXNtLWZhc3RycGMtY29tcHV0ZSIpKSB7IiIiLAogICAgJ1x0aW50IHJldCA9IDA7XG5cdHVpbnQzMl90IHNlY3VyZV9kb21haW5zID0gMDtcblxuXHRhdG9taWNfaW5jKCZhZHNwcnBjX3Byb2JlX2NvdW50KTtcblx0YWRzcHJwY19kaWFnX2NyZWF0ZSgpO1xuXHRwcl9lcnIoImFkc3BycGMtZGlhZzogZmFzdHJwY19wcm9iZSBjYWxsZWQgbj0lZCBub2RlPSVzXFxuIixcblx0ICAgICAgIGF0b21pY19yZWFkKCZhZHNwcnBjX3Byb2JlX2NvdW50KSxcblx0ICAgICAgIChkZXYtPm9mX25vZGUgJiYgZGV2LT5vZl9ub2RlLT5uYW1lKSA/IGRldi0+b2Zfbm9kZS0+bmFtZSA6ICI/Iik7XG5cblx0aWYgKG9mX2RldmljZV9pc19jb21wYXRpYmxlKGRldi0+b2Zfbm9kZSxcblx0XHRcdFx0XHQicWNvbSxtc20tZmFzdHJwYy1jb21wdXRlIikpIHsnLCAiZmFzdHJwY19wcm9iZSBib2R5IikKCiMgNykgbW9kdWxlX2V4aXQg5riF55CGCnJlcCgiXHRkZWJ1Z2ZzX3JlbW92ZV9yZWN1cnNpdmUoZGVidWdmc19yb290KTtcbn0iLAogICAgIlx0ZGVidWdmc19yZW1vdmVfcmVjdXJzaXZlKGRlYnVnZnNfcm9vdCk7XG5cdHJlbW92ZV9wcm9jX2VudHJ5KFwiYWRzcHJwY19kaWFnXCIsIE5VTEwpO1xufSIsCiAgICAibW9kdWxlX2V4aXQiKQoKaW8ub3BlbihwYXRoLCAidyIsIGVuY29kaW5nPSJ1dGYtOCIsIGVycm9ycz0ic3Vycm9nYXRlZXNjYXBlIikud3JpdGUoc3JjKQoKY2hlY2tzID0gWwogICAgKCJwcm9jX2ZzLmgiLCAgICAgICAgICAgICAgIiNpbmNsdWRlIDxsaW51eC9wcm9jX2ZzLmg+IiBpbiBzcmMpLAogICAgKCJzZXFfZmlsZS5oIiwgICAgICAgICAgICAgIiNpbmNsdWRlIDxsaW51eC9zZXFfZmlsZS5oPiIgaW4gc3JjKSwKICAgICgi6K6h5pWw5ZmoIiwgICAgICAgICAgICAgICAgICJhZHNwcnBjX3JwbXNnX3Byb2JlX2NvdW50IiBpbiBzcmMpLAogICAgKCJwcm9iZSDorqHmlbAiLCAgICAgICAgICAgICAiYXRvbWljX2luYygmYWRzcHJwY19ycG1zZ19wcm9iZV9jb3VudCk7IiBpbiBzcmMpLAogICAgKCJkaWFnIOWHveaVsCIsICAgICAgICAgICAgICAiYWRzcHJwY19kaWFnX3Nob3ciIGluIHNyYyksCiAgICAoIk5VTEwg5L+d5oqkIiwgICAgICAgICAgICAgICJpZiAoIW1lLT5jaGFubmVsKSB7IiBpbiBzcmMpLAogICAgKCJwcm9jX2NyZWF0ZSAwNDQ0IiwgICAgICAgJ3Byb2NfY3JlYXRlKCJhZHNwcnBjX2RpYWciLCAwNDQ0JyBpbiBzcmMpLAogICAgKCJmYXN0cnBjX3Byb2JlIOmHjOWIm+W7uiIsICAgImFkc3BycGNfZGlhZ19jcmVhdGUoKTsiIGluIHNyYyksCiAgICAoInJlbW92ZV9wcm9jX2VudHJ5IiwgICAgICAncmVtb3ZlX3Byb2NfZW50cnkoImFkc3BycGNfZGlhZyIsIE5VTEwpOycgaW4gc3JjKSwKICAgICgicHJfZXJyIOiviuaWrei+k+WHuiIsICAgICAgICAiYWRzcHJwYy1kaWFnOiBycG1zZ19wcm9iZSBjYWxsZWQiIGluIHNyYyksCl0KcHJpbnQoIuihpeS4geagoemqjO+8miIpCm9rID0gVHJ1ZQpmb3IgaywgdiBpbiBjaGVja3M6CiAgICBwcmludCgiICAlcyAlcyIgJSAoIk9LICIgaWYgdiBlbHNlICJGQUlMIiwgaykpCiAgICBvayA9IG9rIGFuZCB2CnByaW50KCIgICVkIOWtl+iKgiAtPiAlZCDlrZfoioIiICUgKG9yaWdfbGVuLCBsZW4oc3JjKSkpCnN5cy5leGl0KDAgaWYgb2sgZWxzZSAxKQo=" | base64 -d > /tmp/adsprpc_diag.py
+          echo "补丁脚本 $(wc -l < /tmp/adsprpc_diag.py) 行"
+          TARGET=$(find "$BUILD_DIR" -type f -name 'adsprpc.c' -path '*adsprpc*' | head -1)
+          if [ -z "$TARGET" ]; then
+            echo "::error::找不到 adsprpc.c"; exit 1
+          fi
+          echo "::notice title=补丁目标::$TARGET"
+          cp "$TARGET" "$TARGET.orig"
+          python3 /tmp/adsprpc_diag.py "$TARGET"
+          echo "::notice title=adsprpc 诊断补丁::已应用，新增 /proc/adsprpc_diag（0444）"
+          diff -u "$TARGET.orig" "$TARGET" | head -150 || true
+
+      - name: Patch vermagic.h (keep the modversions word)
+        shell: bash
+        run: |
+          set -e
+          F="$BUILD_DIR/include/linux/vermagic.h"
+          test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
+          cp "$F" "$F.orig"
+          # 原文：
+          #   #ifdef CONFIG_MODVERSIONS
+          #   #define MODULE_VERMAGIC_MODVERSIONS "modversions "
+          #   #else
+          #   #define MODULE_VERMAGIC_MODVERSIONS ""
+          #   #endif
+          # 把 #ifdef 改成 #if 1 -> 无论 MODVERSIONS 开不开，vermagic 里都保留这个词。
+          # 这一步必须和 Configure Kernel 里的 --disable MODVERSIONS 配对使用：
+          #   关 MODVERSIONS  -> 跳过 CRC 校验（解决 module_layout 报错）
+          #   保留该词        -> vermagic 逐字一致（解决 same_magic 整串比较）
+          N=$(grep -c '^#ifdef CONFIG_MODVERSIONS$' "$F" || true)
+          echo "vermagic.h 里 #ifdef CONFIG_MODVERSIONS 出现 $N 次"
+          if [ "$N" != "1" ]; then
+            echo "::error::预期恰好 1 处，实际 $N 处，不敢乱改"; exit 1
+          fi
+          sed -i 's|^#ifdef CONFIG_MODVERSIONS$|#if 1 /* K10x: MODVERSIONS 已关，但 vermagic 必须保留 modversions 一词 */|' "$F"
+          if grep -q '^#ifdef CONFIG_MODVERSIONS' "$F"; then
+            echo "::error::sed 没生效"; exit 1
+          fi
+          echo "===== 改后的 vermagic.h ====="
+          sed -n '1,45p' "$F"
+          echo
+          grep -n 'MODULE_VERMAGIC_MODVERSIONS' "$F"
+          echo "::notice title=vermagic 补丁::MODVERSIONS=n 但 vermagic 仍含 modversions 一词，与原厂逐字一致"
+
       - name: Configure Kernel
         shell: bash
         run: |
@@ -482,6 +601,22 @@ jobs:
             for s in CONFIG_ANDROID_BINDER_IPC CONFIG_ANDROID_BINDERFS CONFIG_ASHMEM CONFIG_ARCH_QCOM CONFIG_MSM_ADSPRPC CONFIG_QCOM_SCM; do
               grep -q "^$s=" out/.config && echo "  ✓ $s" || echo "  ✗ $s 缺失（合并有问题）"
             done
+            # official 片段把这些设成 =m，但调用方在内核里 → 链接时 undefined symbol
+            # 必须强制 =y（和手机 stock 配置一致）
+            if [ "${{ inputs.force_builtin }}" = "true" ]; then
+              echo "===== 强制 vendor 驱动 =y ====="
+              for s in MSM_ADSPRPC QCOM_SCM QCOM_SMEM QCOM_SMP2P QCOM_SMP2P_SLEEPSTATE \
+                       QCOM_GLINK QCOM_GLINK_PKT MSM_GLINK_SSR MSM_SUBSYSTEM_RESTART \
+                       MSM_PIL_SSR_GENERIC MSM_SERVICE_LOCATOR MSM_SERVICE_NOTIFIER \
+                       MSM_CDSP_LOADER MSM_PIL QCOM_QMI_HELPERS ION_MSM_HEAPS \
+                       RPMSG_QCOM_GLINK_NATIVE RPMSG_QCOM_GLINK_RPM \
+                       RPMSG_QCOM_GLINK_SMEM RPMSG_QCOM_GLINK_SPSS RPMSG_CHAR \
+                       ARM_SMMU COMMON_CLK_QCOM CRYPTO_DEV_QCOM_MSM_QCE \
+                       FW_LOADER_USER_HELPER FW_LOADER_USER_HELPER_FALLBACK; do
+                scripts/config --file out/.config --enable "$s"
+              done
+              echo "  已强制 $(scripts/config --file out/.config --state MSM_ADSPRPC) MSM_ADSPRPC / $(scripts/config --file out/.config --state QCOM_SCM) QCOM_SCM"
+            fi
           else
             echo "===== 配置来源：手机 dump 的 k10x_defconfig ====="
             cp "$DEFCONFIG" out/.config
@@ -503,6 +638,31 @@ jobs:
             fi
           fi
 
+          # ★★★ 卡二屏真凶 ★★★
+          # 手机 /vendor/lib/modules/ 里的 .ko 是 OPPO 用原厂内核编的，原厂开了
+          # CONFIG_MODVERSIONS=y，每个符号都带 CRC 校验值。我们的内核也开 MODVERSIONS，
+          # 但 CRC 和原厂不一致 -> 加载时全部报：
+          #     "<模块名>: disagrees about version of symbol module_layout"
+          # dmesg 实测有 200+ 个模块这样失败，其中 msm_glink_ssr / qcom_glink_spss /
+          # glink_pkt / rpmsg_char 全部加载失败 -> ADSP 的 GLINK 传输起不来 ->
+          # adsp 的 rpmsg 通道从来没被创建 -> me->channel[0].rpdev == NULL ->
+          # adsprpc VERIFY 失败(-ENODEV) -> 所有 ADSP HAL abort() -> 卡二屏。
+          # 关掉 MODVERSIONS 后内核不再校验符号 CRC，只校验 vermagic；vermagic 已经
+          # 通过 LOCALVERSION 精确对齐成 5.4.254-qgki-g6818c821e42d，所以原厂 .ko 能加载。
+          # ★★★ 卡二屏真凶：原厂 .ko 的符号 CRC 和我们算的不一致 ★★★
+          # dmesg 实测 200+ 个模块全报 "disagrees about version of symbol module_layout"，
+          # 其中 msm_glink_ssr / qcom_glink_spss / glink_pkt / rpmsg_char 加载失败
+          # -> ADSP 的 GLINK 传输起不来 -> adsp 的 rpmsg 通道从未创建
+          # -> me->channel[0].rpdev == NULL -> adsprpc VERIFY 失败(-ENODEV)
+          # -> 所有 ADSP HAL abort() -> system_server 起不来 -> 卡二屏。
+          #
+          # 关掉 MODVERSIONS 后 check_version() / check_modstruct_version() 都变成
+          # "static inline ... { return 1; }"，CRC 校验整体跳过。
+          #
+          # 但关掉后 vermagic 会少 "modversions" 一词，而 MODVERSIONS=n 时 same_magic()
+          # 是整串 strcmp（不做"跳过版本串"处理）-> bad vermagic -> -ENOEXEC。
+          # 所以必须同时给 include/linux/vermagic.h 打补丁把那个词补回来（见下一步）。
+          scripts/config --file out/.config --disable MODVERSIONS
           # stock 是 MODULE_SIG_FORCE=y，自己编的模块没有官方签名，关掉
           scripts/config --file out/.config --disable MODULE_SIG_FORCE
           # 内核签名相关的其余开关也要关：
@@ -531,11 +691,6 @@ jobs:
           IONMSG=$(head -c 6000 "$RUNNER_TEMP/ion.txt" | tr '\n' ' ' | sed 's/%/%25/g')
           echo "::notice title=ION与DMA配置::${IONMSG}" || true
 
-          echo "===== 签名相关配置最终状态 ====="
-          for k in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY KEXEC_SIG KEXEC_SIG_FORCE; do
-            grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
-          done
-
           # 钉死内核版本串：/vendor 里 stock 的 .ko 靠 vermagic 校验，
           # 版本串变了它们就全部加载失败
           if [ -n "${{ inputs.kernel_release_suffix }}" ]; then
@@ -544,6 +699,108 @@ jobs:
               --set-str LOCALVERSION "${{ inputs.kernel_release_suffix }}"
           fi
 
+          # 追加内核命令行（loglevel=8 → pstore 记下 pr_info，能看到 GLINK/RPMSG 探测）
+          # 注意：CMDLINE 里原本有 cgroup_disable=pressure，必须保留，只追加
+          if [ -n "${{ inputs.extra_cmdline }}" ]; then
+            OLD_CMDLINE="$(scripts/config --file out/.config --state CMDLINE 2>/dev/null || true)"
+            case "$OLD_CMDLINE" in
+              *"${{ inputs.extra_cmdline }}"*) NEW_CMDLINE="$OLD_CMDLINE" ;;
+              "")  NEW_CMDLINE="${{ inputs.extra_cmdline }}" ;;
+              *)   NEW_CMDLINE="$OLD_CMDLINE ${{ inputs.extra_cmdline }}" ;;
+            esac
+            scripts/config --file out/.config --set-str CMDLINE "$NEW_CMDLINE"
+            scripts/config --file out/.config --enable CMDLINE_EXTEND
+            scripts/config --file out/.config --disable CMDLINE_FORCE
+          fi   # ← extra_cmdline 只管上面这段；下面的自检/断言必须无条件执行
+
+          # ===== Droidspaces 官方 GKI 安全配置（5.4 按官方文档属于 GKI 路线）=====
+          # 来源：ravindu644/Droidspaces-OSS  Documentation/Kernel-Configuration.md
+          # ★ 配套 kABI 补丁已在第 13 步打过（SYSVIPC/POSIX_MQUEUE 走 ABI padding），
+          #   所以这里开它们不会移动 task_struct / user_struct 的字段偏移。
+          # ★ 官方红线：下面两个会改变调度器/cgroup 结构体大小 -> 原厂模块按错偏移读
+          #   -> 无限重启。GKI 下必须保持关闭。
+          #     CONFIG_CFS_BANDWIDTH  （依赖 FAIR_GROUP_SCHED，本树 FAIR_GROUP_SCHED=n，天然开不了）
+          #     CONFIG_CGROUP_PIDS
+          scripts/config --file out/.config --disable CFS_BANDWIDTH
+          scripts/config --file out/.config --disable CGROUP_PIDS
+          # 必需项（官方 Kernel-Configuration.md）
+          scripts/config --file out/.config --enable SYSVIPC
+          scripts/config --file out/.config --enable POSIX_MQUEUE
+          scripts/config --file out/.config --enable IPC_NS
+          scripts/config --file out/.config --enable PID_NS
+          scripts/config --file out/.config --enable DEVTMPFS
+          scripts/config --file out/.config --enable NETFILTER_XT_MATCH_ADDRTYPE
+          # 建议项
+          scripts/config --file out/.config --enable USER_NS
+          scripts/config --file out/.config --enable IP6_NF_NAT
+          scripts/config --file out/.config --enable IP6_NF_TARGET_MASQUERADE
+          scripts/config --file out/.config --enable TMPFS_POSIX_ACL
+          scripts/config --file out/.config --enable TMPFS_XATTR
+          # NoMount（KernelSU metamodule；源码由第 14 步集成，这里开 built-in）
+          scripts/config --file out/.config --enable NOMOUNT
+
+          # ===== 所有配置改完之后，最后自检一次（必须放最后，否则打印的是旧值）=====
+          echo "===== 关键配置最终状态（编译前最后一次核对）====="
+          for k in MODVERSIONS MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY \
+                   LOCALVERSION LOCALVERSION_AUTO KEXEC_SIG KEXEC_SIG_FORCE \
+                   CMDLINE CMDLINE_EXTEND CMDLINE_FORCE CMDLINE_FROM_BOOTLOADER \
+                   SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE \
+                   USER_NS IP6_NF_NAT IP6_NF_TARGET_MASQUERADE TMPFS_POSIX_ACL TMPFS_XATTR \
+                   NOMOUNT CFS_BANDWIDTH CGROUP_PIDS FAIR_GROUP_SCHED; do
+            grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
+          done
+          echo
+          echo "===== 硬性断言：不成立就直接失败，避免白刷一次机 ====="
+          if grep -q '^CONFIG_MODVERSIONS=y' out/.config; then
+            echo "::error::CONFIG_MODVERSIONS 还是 y！原厂 .ko 会全部报 module_layout CRC 不符"; exit 1
+          fi
+          echo "  OK CONFIG_MODVERSIONS=n（CRC 校验已整体跳过）"
+          if grep -q '^#ifdef CONFIG_MODVERSIONS' "$BUILD_DIR/include/linux/vermagic.h"; then
+            echo "::error::vermagic.h 补丁没生效！vermagic 会少 modversions 一词 -> bad vermagic"; exit 1
+          fi
+          echo "  OK vermagic.h 已打补丁（vermagic 里仍有 modversions 一词）"
+          if grep -q '^CONFIG_MODULE_SIG_FORCE=y' out/.config; then
+            echo "::error::CONFIG_MODULE_SIG_FORCE 还是 y！原厂 .ko 没有我们的签名"; exit 1
+          fi
+          echo "  OK CONFIG_MODULE_SIG_FORCE 已关闭"
+          if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
+            echo "::error::LOCALVERSION_AUTO 还是 y，vermagic 会多出 -g<hash>"; exit 1
+          fi
+          echo "  OK CONFIG_LOCALVERSION_AUTO 已关闭"
+          LV="$(scripts/config --file out/.config --state LOCALVERSION 2>/dev/null || true)"
+          echo "  LOCALVERSION = $LV"
+          if [ "$LV" != "${{ inputs.kernel_release_suffix }}" ]; then
+            echo "::error::LOCALVERSION 不等于 ${{ inputs.kernel_release_suffix }}，vermagic 对不上"; exit 1
+          fi
+          echo "  OK vermagic 已对齐"
+          # ── Droidspaces 必需项必须为 y ──
+          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE; do
+            if ! grep -q "^CONFIG_${k}=y" out/.config; then
+              echo "::error::CONFIG_${k} 不是 y！Droidspaces 跑不起来"; exit 1
+            fi
+          done
+          echo "  OK Droidspaces 必需项全为 y"
+          # ── kABI 补丁必须在位（否则开 SYSVIPC 会平移 task_struct 偏移 -> 原厂模块崩）──
+          if ! grep -q 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem)' "$BUILD_DIR/include/linux/sched.h"; then
+            echo "::error::sched.h 缺 SYSVIPC 的 ABI padding 补丁"; exit 1
+          fi
+          if ! grep -q 'ANDROID_KABI_USE(1, unsigned long mq_bytes)' "$BUILD_DIR/include/linux/sched/user.h"; then
+            echo "::error::user.h 缺 POSIX_MQUEUE 的 ABI padding 补丁"; exit 1
+          fi
+          echo "  OK kABI 补丁在位（task_struct / user_struct 布局不变）"
+          # ── NoMount ──
+          if ! grep -q "^CONFIG_NOMOUNT=y" out/.config; then
+            echo "::error::CONFIG_NOMOUNT 不是 y！NoMount 没编进去"; exit 1
+          fi
+          echo "  OK CONFIG_NOMOUNT=y"
+          # ── 官方红线 ──
+          if grep -q "^CONFIG_CFS_BANDWIDTH=y" out/.config; then
+            echo "::error::CONFIG_CFS_BANDWIDTH=y！Droidspaces 官方警告会破坏 kABI -> 无限重启"; exit 1
+          fi
+          if grep -q "^CONFIG_CGROUP_PIDS=y" out/.config; then
+            echo "::error::CONFIG_CGROUP_PIDS=y！Droidspaces 官方警告会破坏 kABI -> 无限重启"; exit 1
+          fi
+          echo "  OK CFS_BANDWIDTH / CGROUP_PIDS 保持关闭（官方红线）"
           # 只影响编译速度和产物体积，不影响功能（CI 上能省一大半时间）
           scripts/config --file out/.config --disable DEBUG_INFO
 
@@ -555,6 +812,63 @@ jobs:
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
           make O=out olddefconfig
+
+          # ===== ★ olddefconfig 之后的最终核对（必需）=====
+          # 上面那些断言跑在 olddefconfig **之前**，那时 scripts/config 刚写进去的值
+          # 还没经过依赖裁剪。依赖不满足的符号会被 olddefconfig 静默丢掉，
+          # 而下面那个「被丢弃的符号」报告只比对 $DEFCONFIG（手机 dump），
+          # 发现不了我们新加的符号被丢 —— 所以这里必须再查一遍真正生效的值。
+          echo "===== Droidspaces / NoMount 最终生效值（olddefconfig 之后）====="
+          grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|NETFILTER_XT_MATCH_ADDRTYPE|USER_NS|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|TMPFS_POSIX_ACL|TMPFS_XATTR|NOMOUNT|CFS_BANDWIDTH|CGROUP_PIDS|FAIR_GROUP_SCHED)=' out/.config || true
+          echo
+          DS_MISSING=""
+          # 必需项 + 建议项全部要求 =y：
+          # 本工作流只编 Image.gz / Image，不编 modules，任何解析成 =m 的都会静默丢失。
+          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE \
+                   USER_NS IP6_NF_NAT IP6_NF_TARGET_MASQUERADE TMPFS_POSIX_ACL TMPFS_XATTR \
+                   NOMOUNT; do
+            grep -q "^CONFIG_${k}=y" out/.config || DS_MISSING="$DS_MISSING $k"
+          done
+          if [ -n "$DS_MISSING" ]; then
+            echo "::error::olddefconfig 之后这些必需项没生效：$DS_MISSING（依赖不满足被静默丢掉）"
+            exit 1
+          fi
+          echo "  OK Droidspaces + NoMount 必需项在 olddefconfig 之后仍全部 =y"
+          for k in CFS_BANDWIDTH CGROUP_PIDS; do
+            if grep -q "^CONFIG_${k}=y" out/.config; then
+              echo "::error::olddefconfig 之后 CONFIG_${k}=y！破坏 kABI -> 无限重启"; exit 1
+            fi
+          done
+          echo "  OK CFS_BANDWIDTH / CGROUP_PIDS 在 olddefconfig 之后仍未开启"
+          # 卡二屏的三个关键项，olddefconfig 之后必须仍然成立
+          if grep -q '^CONFIG_MODVERSIONS=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_MODVERSIONS 又变回 y！原厂 .ko 会全部 CRC 不符 -> 卡二屏"; exit 1
+          fi
+          if grep -q '^CONFIG_MODULE_SIG_FORCE=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_MODULE_SIG_FORCE 又变回 y！"; exit 1
+          fi
+          if grep -q '^CONFIG_LOCALVERSION_AUTO=y' out/.config; then
+            echo "::error::olddefconfig 之后 CONFIG_LOCALVERSION_AUTO 又变回 y！vermagic 会多出 -g<hash>"; exit 1
+          fi
+          echo "  OK MODVERSIONS=n / MODULE_SIG_FORCE=n / LOCALVERSION_AUTO=n 在 olddefconfig 之后仍成立"
+          # KernelSU-Next：CONFIG_KSU 是 tristate + default y，但要确认没被裁成 =m 或被丢
+          if [ "${{ inputs.enable_ksu }}" = "true" ]; then
+            for k in KSU KSU_SYSCALL_TABLE_HOOK; do
+              if ! grep -q "^CONFIG_${k}=y" out/.config; then
+                echo "::error::olddefconfig 之后 CONFIG_${k} 不是 y！KernelSU-Next 没编进去"; exit 1
+              fi
+            done
+            if grep -q "^CONFIG_KSU_KPROBES_HOOK=y" out/.config; then
+              echo "::error::KSU_KPROBES_HOOK 被打开了（我们选的是 syscall_table 模式）"; exit 1
+            fi
+            if grep -qE '^ccflags-y \+= -DKSU_HAS_PATH_UMOUNT' "$BUILD_DIR/KernelSU-Next/kernel/Kbuild"; then
+              echo "::error::KSU_HAS_PATH_UMOUNT 没关掉，链接期会 undefined symbol: path_umount"; exit 1
+            fi
+            echo "  OK KernelSU-Next: KSU=y + SYSCALL_TABLE_HOOK=y + KPROBES_HOOK=n + PATH_UMOUNT 已关"
+          else
+            echo "  （enable_ksu=false，跳过 KernelSU 核对）"
+          fi
+          echo "::notice title=配置最终核对::olddefconfig 之后 Droidspaces 必需项 + NoMount + 卡二屏三项全部符合预期"
 
           echo "===== KernelSU 配置 ====="
           grep -E 'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES)=' out/.config || true
@@ -729,7 +1043,11 @@ jobs:
         run: |
           set -euxo pipefail
           cd AnyKernel3
-          zip -r9 "$GITHUB_WORKSPACE/OPPO_K10x_A_5.4.254_KSU.zip" . \
+          # 包名带上三个集成项，方便区分刷的是哪个包
+          ZIPNAME="OPPO_K10x_A_5.4.254_$( [ "${{ inputs.enable_ksu }}" = "true" ] && echo KSU || echo NoKSU )_NM_DS$( [ "${{ inputs.diag_patch }}" = "true" ] && echo _DIAG || echo ).zip"
+          echo "ZIPNAME=$ZIPNAME" >> "$GITHUB_ENV"
+          echo "::notice title=AK3 包名::$ZIPNAME"
+          zip -r9 "$GITHUB_WORKSPACE/$ZIPNAME" . \
             -x '.git/*' -x '.git/**' -x 'README.md' -x 'patch/*'
 
       - name: Upload Kernel Image
@@ -747,7 +1065,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OPPO-K10x-A
-          path: OPPO_K10x_A_5.4.254_KSU.zip
+          path: ${{ env.ZIPNAME }}
           if-no-files-found: error
           retention-days: 7
 
@@ -784,6 +1102,19 @@ jobs:
             echo "::notice title=配置阶段报错::$(grep -nE '::error::|Error [0-9]+|No rule to make' "$CFG" | head -10 || echo '(无)')"
           else
             echo "::warning title=配置日志::config.log 不存在"
+          fi
+
+          # 3.6) 内核命令行最终值（读实际 out/.config，不是 echo）
+          CFGF="$BUILD_DIR/out/.config"
+          if [ -f "$CFGF" ]; then
+            echo "::notice title=内核命令行最终值::$(grep -E '^CONFIG_CMDLINE(=|_EXTEND|_FORCE|_FROM_BOOTLOADER)' "$CFGF" | tr '\n' ' | ')"
+            # 3.7) vermagic 三件套（决定原厂 .ko 能不能加载）
+            VH="$BUILD_DIR/include/linux/vermagic.h"
+            VM1="$(grep -c '^#ifdef CONFIG_MODVERSIONS' "$VH" 2>/dev/null || echo '?')"
+            VM2="$(grep -m1 'MODULE_VERMAGIC_MODVERSIONS' "$VH" 2>/dev/null | sed 's/^[ \t]*//')"
+            VM3="$(grep -E '^#? ?CONFIG_MODVERSIONS' "$CFGF" 2>/dev/null | head -1)"
+            VM4="$(grep -E '^CONFIG_LOCALVERSION(=|_AUTO)' "$CFGF" 2>/dev/null | tr '\n' ' ')"
+            echo "::notice title=vermagic 三件套::vermagic.h 里 #ifdef CONFIG_MODVERSIONS 出现 $VM1 次（必须 0）| $VM2 | $VM3 | $VM4"
           fi
 
           # 4) 最终产物
