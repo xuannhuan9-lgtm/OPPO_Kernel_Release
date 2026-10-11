@@ -432,7 +432,10 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Integrate KernelSU-Next (legacy)
         shell: bash
-        if: ${{ inputs.enable_ksu == 'true' }}
+        # ★ enable_ksu 是 type:boolean，inputs.enable_ksu 拿到的是布尔值。
+        #   写成 == 'true' 在 GitHub 表达式里会变成 1 == NaN，恒为假，
+        #   导致本步骤永远被跳过（2026-10-11 run 38148624571 就是这样挂的）。
+        if: ${{ inputs.enable_ksu }}
         run: |
           set -euxo pipefail
           cd "$BUILD_DIR"
@@ -623,6 +626,11 @@ jobs:
           fi
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
+            # 前置断言：KSU 步骤被跳过/失败时立刻报清楚，别等到 olddefconfig 之后
+            if [ ! -d "$BUILD_DIR/drivers/kernelsu" ]; then
+              echo "::error::enable_ksu=true 但 drivers/kernelsu 不存在（Integrate KernelSU-Next 被跳过或失败）"
+              exit 1
+            fi
             scripts/config --file out/.config --enable KSU
 
             if [ "${{ inputs.ksu_hook }}" = "kprobes" ]; then
