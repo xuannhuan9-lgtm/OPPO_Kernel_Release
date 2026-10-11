@@ -5,7 +5,7 @@
 #   依据     : 那个能开机的非官方内核版本串 5.4.233-qgki-unofficial-gf81d548c5043-dirty
 #   KernelSU : 关闭（先确认内核能开机，再开）
 #   赌的是   : 你之前卡二屏，是因为源码 commit 太旧（旧了 166 个 commit）
-#   产出 zip : OPPO_K10x_A_5.4.233.zip
+#   产出 zip : OPPO_K10x_A_5.4.254_KSU.zip
 # ============================================================================
 name: "[A] OPPO K10x k10x_5g (5.4.233->254 + KernelSU-Next)"
 
@@ -126,8 +126,15 @@ jobs:
       KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_sm6375.git
       DRIVER_REPO: https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_sm6375.git
       # stock 内核是 clang 11.0.2 编的：defconfig 里 CONFIG_CLANG_VERSION=110002
-      CLANG_REPO_BRANCH: android-14.0.0_r0.140
-      CLANG_DIR_NAME: clang-r416183b
+      # 原厂 defconfig: CONFIG_CLANG_VERSION=110002 → Clang 11.0.2 = clang-r383902
+      # 原厂还开了 LTO_CLANG + CFI_CLANG(强制) + MODVERSIONS，这些对编译器版本极度敏感
+      CLANG_CANDIDATES: |
+        android-11.0.0_r48:clang-r383902
+        android-12.0.0_r1:clang-r383902
+        android-11.0.0_r40:clang-r383902
+        android-11.0.0_r1:clang-r383902
+        android-12.0.0_r2:clang-r383902
+
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 2G
       CCACHE_COMPRESS: '1'
@@ -339,21 +346,36 @@ jobs:
           echo "===== 组装完成 ====="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' "$BUILD_DIR/Makefile"
 
-      - name: Clone Clang r416183b (12.0.5)
+      - name: Clone Clang r383902 (11.0.2)
         shell: bash
         run: |
           set -euxo pipefail
           TOOLCHAIN_DIR="$GITHUB_WORKSPACE/toolchains"
           mkdir -p "$TOOLCHAIN_DIR"
-          git clone --depth=1 --filter=blob:none --sparse \
-            --branch "$CLANG_REPO_BRANCH" \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86.git \
-            "$TOOLCHAIN_DIR/clang-repo"
-          git -C "$TOOLCHAIN_DIR/clang-repo" sparse-checkout set "$CLANG_DIR_NAME"
-          CLANG_DIR="$TOOLCHAIN_DIR/clang-repo/$CLANG_DIR_NAME"
+          CLANG_DIR=""
+          while IFS=: read -r BR DIR; do
+            [ -z "$BR" ] && continue
+            echo "----- 尝试 $BR / $DIR -----"
+            rm -rf "$TOOLCHAIN_DIR/clang-repo"
+            if git clone --depth=1 --filter=blob:none --sparse \
+                 --branch "$BR" \
+                 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86.git \
+                 "$TOOLCHAIN_DIR/clang-repo" 2>&1 | tail -3; then
+              if git -C "$TOOLCHAIN_DIR/clang-repo" sparse-checkout set "$DIR" 2>&1 \
+                 && [ -x "$TOOLCHAIN_DIR/clang-repo/$DIR/bin/clang" ]; then
+                CLANG_DIR="$TOOLCHAIN_DIR/clang-repo/$DIR"
+                echo "✓ 用上了 $BR / $DIR"
+                break
+              fi
+            fi
+            echo "✗ $BR 里没有 $DIR，换下一个"
+          done <<< "$CLANG_CANDIDATES"
+
+          test -n "$CLANG_DIR" || { echo "::error::所有候选 clang 分支都没有 clang-r383902"; exit 1; }
           test -x "$CLANG_DIR/bin/clang"
           test -x "$CLANG_DIR/bin/ld.lld"
           "$CLANG_DIR/bin/clang" --version
+          "$CLANG_DIR/bin/clang" --version | grep -q '11\.0\.2' || echo "::warning::clang 版本不是 11.0.2，请核对输出"
           echo "CLANG_DIR=$CLANG_DIR" >> "$GITHUB_ENV"
           echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
 
@@ -610,11 +632,15 @@ jobs:
           find out/arch/arm64/boot/dts/vendor \( -name '*.dtb' -o -name '*.dtbo' \) 2>/dev/null | head -50 || true
 
       - name: Clone and Configure AnyKernel3
-        if: false
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          # 保险：有些配置只产出 Image，不产出 Image.gz
+          if [ ! -f "$BUILD_DIR/out/arch/arm64/boot/Image.gz" ]; then
+            gzip -9 -c "$BUILD_DIR/out/arch/arm64/boot/Image" > "$BUILD_DIR/out/arch/arm64/boot/Image.gz"
+            echo "Image.gz 不存在，已现场压缩生成"
+          fi
           cp "$BUILD_DIR/out/arch/arm64/boot/Image.gz" AnyKernel3/Image.gz
 
           # 默认模板是给 Galaxy Nexus 的：device.name1=maguro，机型校验会拒绝 K10x
@@ -630,12 +656,11 @@ jobs:
           # 完全兼容；放错一个 DTB 反而会直接卡一屏。
 
       - name: Package AnyKernel3
-        if: false
         shell: bash
         run: |
           set -euxo pipefail
           cd AnyKernel3
-          zip -r9 "$GITHUB_WORKSPACE/OPPO_K10x_A_5.4.233.zip" . \
+          zip -r9 "$GITHUB_WORKSPACE/OPPO_K10x_A_5.4.254_KSU.zip" . \
             -x '.git/*' -x '.git/**' -x 'README.md' -x 'patch/*'
 
       - name: Upload Kernel Image
@@ -650,11 +675,10 @@ jobs:
           retention-days: 7
 
       - name: Upload AnyKernel3 Package
-        if: false
         uses: actions/upload-artifact@v4
         with:
           name: OPPO-K10x-A
-          path: OPPO_K10x_A_5.4.233.zip
+          path: OPPO_K10x_A_5.4.254_KSU.zip
           if-no-files-found: error
           retention-days: 7
 
