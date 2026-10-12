@@ -488,6 +488,34 @@ jobs:
           fi
           [ -z "$(find . -name '*.rej')" ] || { echo "::error::仍有 .rej 残留"; find . -name '*.rej'; exit 1; }
 
+          # ★ K10x: builtin 分支的 ksu_hooks[] 在本配置下是空的 ——
+          #   key_permission 只给 <4.10；task_fix_setuid 被 #ifndef CONFIG_KSU_SUSFS 排除，
+          #   而我们恰好开了 CONFIG_KSU_SUSFS=y。空 hook 表 -> ksu_install_fd() 永不被调用
+          #   -> 管理器连不上内核 -> SukiSU Ultra 显示「不支持」。
+          #   把它强制编进去：它自己就能调 ksu_install_fd()，不依赖 susfs_zygote_sid。
+          LH="hook/lsm_hook.c"
+          test -f "$LH" || { echo "::error::找不到 $LH"; exit 1; }
+          echo "  改前 ksu_hooks 条目："
+          grep -n -B2 -A8 'static struct security_hook_list ksu_hooks' "$LH" || true
+          # 两处都要改：
+          #   #ifdef CONFIG_KSU_SUSFS  (第19行) 把 ksu_task_fix_setuid 也编出来
+          #   #ifndef CONFIG_KSU_SUSFS (第183行) 把它注册进 ksu_hooks[]
+          # 只改一处会引用到不存在的函数 -> 编译失败。
+          sed -i 's|^#ifdef CONFIG_KSU_SUSFS$|#if 1 /* K10x: 让 ksu_task_fix_setuid 也编译出来 */|' "$LH"
+          sed -i 's|^#ifndef CONFIG_KSU_SUSFS$|#if 1 /* K10x: 让 task_fix_setuid 注册进 ksu_hooks，避免空表 -> 管理器显示不支持 */|' "$LH"
+          if grep -q '^#ifdef CONFIG_KSU_SUSFS$' "$LH" || grep -q '^#ifndef CONFIG_KSU_SUSFS$' "$LH"; then
+            echo "::error::lsm_hook.c 里还有没改掉的 CONFIG_KSU_SUSFS 条件"; exit 1
+          fi
+          CN1=$(grep -c 'K10x: 让 ksu_task_fix_setuid' "$LH" || true)
+          CN2=$(grep -c 'K10x: 让 task_fix_setuid 注册进' "$LH" || true)
+          echo "  两处补丁命中: $CN1 / $CN2（都应为 1）"
+          [ "$CN1" -eq 1 ] && [ "$CN2" -eq 1 ] || { echo "::error::lsm_hook.c 补丁没打全"; exit 1; }
+          # 确认 ksu_task_fix_setuid 的定义和注册都在编译范围内
+          grep -qE '^static int ksu_task_fix_setuid' "$LH" || { echo "::error::找不到 ksu_task_fix_setuid 定义"; exit 1; }
+          grep -q 'LSM_HOOK_INIT(task_fix_setuid, ksu_task_fix_setuid)' "$LH" || { echo "::error::找不到 task_fix_setuid 注册"; exit 1; }
+          echo "  改后 ksu_hooks 条目："
+          grep -n -A8 'static struct security_hook_list ksu_hooks' "$LH" || true
+          echo "  OK task_fix_setuid 钩子已强制编入（ksu_hooks 不再为空）"
           grep -q '__maybe_static' feature/selinux_hide.c \
             || { echo "::error::feature/selinux_hide.c 的 __maybe_static 没打上"; exit 1; }
           grep -q '__has_attribute' infra/kernel_compat.h \
@@ -1211,10 +1239,10 @@ jobs:
             echo "  OK 另外 8 个也都在 .config 里"
           fi
           for s in MSM_ADSP_LOADER MSM_QDSP6V2_CODECS MSM_QDSP6_APRV2_RPMSG MSM_QDSP6_SSR MSM_QDSP6_PDR MSM_QDSP6_NOTIFIER SND_SOC_MSM_QDSP6V2_INTF SND_SOC_QDSP6V2 SND_EVENT; do
-            grep -qE "^export CONFIG_${s}=y\$" techpack/audio/config/holiauto.conf \
-              || { echo "::error::ADSP 命脉 $s 不是 =y，ADSP 起不来"; exit 1; }
+            grep -qE "^[[:space:]]*export CONFIG_${s}=m[[:space:]]*\$" techpack/audio/config/holiauto.conf \
+              || { echo "::error::A6e 要求 $s 保持 =m（交给原厂 .ko），但它不是 =m"; exit 1; }
           done
-          echo "  OK 9 个 ADSP 命脉在 olddefconfig 之后仍是 =y"
+          echo "  OK 9 个 ADSP 命脉 + SND_EVENT 保持 =m（等原厂 .ko 加载）"
           TCNT=$( { for f in techpack/audio/config/*.conf techpack/camera/config/*.conf \
                    techpack/video/config/*.conf techpack/display/config/*.conf \
                    techpack/dataipa/config/*.conf ; do
