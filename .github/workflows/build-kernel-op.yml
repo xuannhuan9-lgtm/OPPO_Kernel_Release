@@ -269,7 +269,7 @@ jobs:
       # ★ A6 新增：Rancemxn 的 sm6375_defconfig —— 47 个 =m 的完整配置 + 性能优化
       #   190483 字节，超过 env 48KB 上限，运行时下载
       RANCE_DEFCONFIG_URL: https://raw.githubusercontent.com/Rancemxn/android_kernel_oppo_sm6375/main/arch/arm64/configs/sm6375_defconfig
-      RANCE_DEFCONFIG_MIRROR: https://cdn.jsdelivr.net/gh/Rancemxn/android_kernel_oppo_sm6375@main/arch/arm64/configs/sm6375_defconfig
+      RANCE_DEFCONFIG_MIRROR: "https://api.github.com/repos/Rancemxn/android_kernel_oppo_sm6375/contents/arch/arm64/configs/sm6375_defconfig?ref=main"
       RANCE_DEFCONFIG_SHA256: "540f7b240a998f47"
       RANCE_DEFCONFIG_SIZE: "190483"
       SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_5.4.patch
@@ -591,6 +591,50 @@ jobs:
           echo "  OK techpack/audio 和 techpack/camera 的源码树都在"
 
           echo "::notice title=全部内建::47 个驱动已改成 =y（techpack 改 conf，其余走 scripts/config），纯 233 不再依赖 /vendor 的 .ko"
+      - name: 修复内建驱动的符号冲突（wcd938x 与 wcd937x 重名）
+        if: ${{ inputs.enable_ksu }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+
+          # ★★★★★★★ 为什么必须改（A5/A6 首轮链接就是死在这里）★★★★★★★
+          # wcd937x.c 和 wcd938x.c 各有 7 个【非 static】全局变量，名字和内容一模一样：
+          #   const char * const tx_master_ch_text[]     / const struct soc_enum tx_master_ch_enum
+          #   const char * const die_crk_det_en_text[]   / const u8 det_en[]
+          #   const char * const die_crk_det_int1_text[] / const u8 det_int1[]
+          #   const char * const die_crk_det_out_text[]
+          # 编成 .ko 时互不干扰（各在一个模块里）；47 个驱动全部内建进 vmlinux 后
+          # ld.lld 直接报 duplicate symbol，链接失败。
+          #
+          # 安全性已逐行核实：
+          #   · 这 7 个符号在各自 .c 里只被【本文件】的 soc_enum / mixer 引用（2~14 次）
+          #   · wcd937x.h / wcd938x.h 里【没有】它们的 extern 声明
+          #     → 不存在任何跨文件引用 → 加 static 不会破坏任何东西
+          # 只改 wcd938x.c、不动 wcd937x.c：万一真有外部引用，仍然解析到
+          # wcd937x.c 那一份（内容完全相同），零风险。
+
+          F=techpack/audio/asoc/codecs/wcd938x/wcd938x.c
+          test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
+          PAT='^const (char \* const|struct soc_enum|u8) (tx_master_ch_text|tx_master_ch_enum|die_crk_det_en_text|det_en|die_crk_det_int1_text|det_int1|die_crk_det_out_text)'
+          SPAT='^static const (char \* const|struct soc_enum|u8) (tx_master_ch_text|tx_master_ch_enum|die_crk_det_en_text|det_en|die_crk_det_int1_text|det_int1|die_crk_det_out_text)'
+
+          echo "===== 改之前 ====="
+          grep -nE "$PAT" "$F" | sed 's/^/  /' || true
+
+          sed -i -E "s/$PAT/static const \1 \2/" "$F"
+
+          echo "===== 改之后 ====="
+          grep -nE "$SPAT" "$F" | sed 's/^/  /' || true
+          N=$(grep -cE "$SPAT" "$F" || true)
+          [ "$N" -eq 7 ] || { echo "::error::期望 7 个符号变 static，实际 $N 个"; exit 1; }
+
+          G=$(grep -cE "$PAT" techpack/audio/asoc/codecs/wcd937x/wcd937x.c || true)
+          [ "$G" -eq 7 ] || { echo "::error::wcd937x.c 应保持 7 个全局定义，实际 $G 个（被误改了？）"; exit 1; }
+          echo "  OK wcd937x.c 保持 7 个全局定义（作兜底），wcd938x.c 7 个已 static"
+
+          echo "::notice title=内建符号冲突修复::wcd938x.c 的 7 个重名全局变量已加 static；wcd937x.c 保持原样作兜底"
+
       - name: Clone Clang r383902 (11.0.2)
         shell: bash
         run: |
@@ -1129,7 +1173,7 @@ jobs:
           DEFCONFIG="$GITHUB_WORKSPACE/k10x_defconfig"
 
           if curl -LSsf -o "$RANCE_CFG" "$RANCE_DEFCONFIG_URL" || \
-             curl -LSsf -o "$RANCE_CFG" "$RANCE_DEFCONFIG_MIRROR"; then
+             curl -LSsf -H "Accept: application/vnd.github.raw" -o "$RANCE_CFG" "$RANCE_DEFCONFIG_MIRROR"; then
             SZ=$(wc -c < "$RANCE_CFG")
             SH=$(sha256sum "$RANCE_CFG" | cut -c1-16)
             echo "  大小 $SZ（期望 $RANCE_DEFCONFIG_SIZE）  sha256前16 $SH（期望 $RANCE_DEFCONFIG_SHA256）"
@@ -1227,8 +1271,8 @@ jobs:
           #
           # 手机 dump 的 k10x_defconfig 里这些要么没有、要么是 =m，所以必须显式打开。
           # 对照 Rancemxn 的 arch/arm64/configs/sm6375_defconfig（他有 47 个 =m）。
-          DRV_KCONFIG="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT QCOM_APR SOUNDWIRE SOUNDWIRE_WCD_CTRL"
-          echo "===== A5：打开 14 个 Kconfig 级驱动 ====="
+          DRV_KCONFIG="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT SOUNDWIRE_WCD_CTRL"
+          echo "===== A6b：打开 12 个 Kconfig 级驱动（QCOM_APR/SOUNDWIRE 已排除）====="
           DRV_OK=0
           for s in $DRV_KCONFIG; do
             if scripts/config --file out/.config --enable "$s" 2>/dev/null; then
@@ -1238,8 +1282,8 @@ jobs:
               echo "  ⚠ $s 不在这个 Kconfig 树里，跳过"
             fi
           done
-          echo "  已处理 $DRV_OK / 14 个"
-          echo "::notice title=全部内建(配置)::14 个 Kconfig 级驱动已 --enable，33 个 techpack 驱动已在 conf 里改成 =y"
+          echo "  已处理 $DRV_OK / 12 个"
+          echo "::notice title=全部内建(配置)::12 个 Kconfig 级驱动已 --enable（QCOM_APR/SOUNDWIRE 已排除，避免与 techpack 的 apr/swr 符号冲突），techpack 驱动已在 conf 里改成 =y"
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
             # 前置断言：KSU 步骤被跳过/失败时立刻报清楚，别等到 olddefconfig 之后
@@ -1285,8 +1329,8 @@ jobs:
               --disable KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
               --disable KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
               --disable KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-              --disable KSU_TRACEPOINT_HOOK
-
+              --disable KSU_TRACEPOINT_HOOK \
+              --enable  KSU_KPROBES_HOOK
             # ★ KSU_KPROBES_HOOK 靠 sys_enter/sys_exit 两个 tracepoint 抓系统调用。
             #   这两个 tracepoint 定义在 include/trace/events/syscalls.h，
             #   而该头文件只在 kernel/trace/trace_syscalls.c 里被 include，
@@ -1410,6 +1454,12 @@ jobs:
           scripts/config --file out/.config --enable IPC_NS
           scripts/config --file out/.config --enable PID_NS
           scripts/config --file out/.config --enable DEVTMPFS
+          # ★ CGROUP_DEVICE 官方故障表标为「致命。容器无法启动。」
+          #   手机 dump 和 Rancemxn 配置里都是 not set，必须显式打开。
+          #   它让 cgroup_subsys.h 多一个 SUBSYS(devices)，CGROUP_SUBSYS_COUNT +1；
+          #   但本工作流是 MODVERSIONS=n + 驱动全部内建，不依赖任何外部 .ko，
+          #   原厂 .ko 本来就因 vermagic 加载不了，所以这个布局变化不引入新风险。
+          scripts/config --file out/.config --enable CGROUP_DEVICE
           scripts/config --file out/.config --enable NETFILTER_XT_MATCH_ADDRTYPE
           # 建议项
           scripts/config --file out/.config --enable USER_NS
@@ -1437,7 +1487,7 @@ jobs:
           for k in MODVERSIONS MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL MODULE_SIG_KEY \
                    LOCALVERSION LOCALVERSION_AUTO KEXEC_SIG KEXEC_SIG_FORCE \
                    CMDLINE CMDLINE_EXTEND CMDLINE_FORCE CMDLINE_FROM_BOOTLOADER \
-                   SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE \
+                   SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS CGROUP_DEVICE NETFILTER_XT_MATCH_ADDRTYPE \
                    USER_NS IP6_NF_NAT IP6_NF_TARGET_MASQUERADE TMPFS_POSIX_ACL TMPFS_XATTR \
                    NOMOUNT CFS_BANDWIDTH CGROUP_PIDS FAIR_GROUP_SCHED; do
             grep -E "^(# )?CONFIG_${k}[= ]" out/.config || echo "  CONFIG_${k}: 不存在"
@@ -1474,7 +1524,7 @@ jobs:
           fi
           echo "  OK vermagic 已对齐"
           # ── Droidspaces 必需项必须为 y ──
-          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE; do
+          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS CGROUP_DEVICE NETFILTER_XT_MATCH_ADDRTYPE; do
             if ! grep -q "^CONFIG_${k}=y" out/.config; then
               echo "::error::CONFIG_${k} 不是 y！Droidspaces 跑不起来"; exit 1
             fi
@@ -1524,7 +1574,7 @@ jobs:
           DS_MISSING=""
           # 必需项 + 建议项全部要求 =y：
           # 本工作流只编 Image.gz / Image，不编 modules，任何解析成 =m 的都会静默丢失。
-          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS NETFILTER_XT_MATCH_ADDRTYPE \
+          for k in SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS CGROUP_DEVICE NETFILTER_XT_MATCH_ADDRTYPE \
                    USER_NS IP6_NF_NAT IP6_NF_TARGET_MASQUERADE TMPFS_POSIX_ACL TMPFS_XATTR \
                    NOMOUNT; do
             grep -q "^CONFIG_${k}=y" out/.config || DS_MISSING="$DS_MISSING $k"
@@ -1578,12 +1628,21 @@ jobs:
             echo "  OK KSU=y + susfs 全特性 10 项 + KPM=y + KALLSYMS_ALL=y + THREAD_INFO_IN_TASK=y"
 
             # ── hook 路线必须是 susfs 内联钩子 ──
-            for k in KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK; do
+            for k in KSU_KPROBES_HOOK; do
               if grep -q "^CONFIG_${k}=y" out/.config; then
                 echo "::error::CONFIG_${k}=y 会盖掉 susfs 的内联钩子，面具会显示「未集成」"; exit 1
               fi
             done
             echo "  OK MANUAL_HOOK / TRACEPOINT_HOOK 均未开启（走 susfs 内联钩子）"
+
+            # ★ KSU_KPROBES_HOOK 必须显式 =y —— 不能只靠 Kconfig choice 的默认值。
+            #   钩子模式不对 = 面具显示「未集成」（2026-10-11 run 38148624571 的根因）。
+            if ! grep -q "^CONFIG_KSU_KPROBES_HOOK=y" out/.config; then
+              echo "::error::CONFIG_KSU_KPROBES_HOOK 不是 y！钩子模式不对，面具会显示「未集成」"
+              grep -E "CONFIG_KSU_(KPROBES|MANUAL|TRACEPOINT)" out/.config || true
+              exit 1
+            fi
+            echo "  OK KSU_KPROBES_HOOK=y（sys_enter/sys_exit tracepoint 钩子）"
 
             # ── kprobes 模式还要确认 syscall tracepoint 真的在 ──
             if ! grep -q "^CONFIG_FTRACE_SYSCALLS=y" out/.config; then
@@ -1618,10 +1677,10 @@ jobs:
           # ── ★ A6：47 个内建驱动的存活核对（olddefconfig 之后）──
           # 那 14 个里，实测有 6 个其实是 techpack 的 export（步骤 9 已把 conf 改成 =y）：
           #   GSI / RNDIS_IPA / IPA_CLIENTS_MANAGER（dataipa）、MSM_VIDC_V4L2（video）、
-          #   DISPLAY_BUILD（display）、SOUNDWIRE（audio）
+          #   DISPLAY_BUILD（display）
           # 其余 8 个必须靠 scripts/config 写进 .config。
           # scripts/config 不检查 Kconfig 是否存在 —— 不存在的项会被 olddefconfig 静默丢掉。
-          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT QCOM_APR SOUNDWIRE"
+          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT"
           DRV_SOFT="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD SOUNDWIRE_WCD_CTRL"
           DMISS=""
           for k in $DRV_HARD; do
@@ -1632,7 +1691,18 @@ jobs:
             echo "（它们在手机 dump 里确认存在，被丢掉说明依赖不满足或 Kconfig 没被 source 进来）"
             exit 1
           fi
-          echo "  OK 6 个确认的 Kconfig 驱动在 olddefconfig 之后仍 =y"
+          echo "  OK 4 个确认的 Kconfig 驱动在 olddefconfig 之后仍 =y"
+          # ★ A6b：QCOM_APR / SOUNDWIRE 必须【不】内建
+          #   QCOM_APR=y  → drivers/soc/qcom/apr.o 与 techpack/audio/ipc/apr.o
+          #                 同时提供 apr_send_pkt → duplicate symbol（A5/A6 首轮）
+          #   SOUNDWIRE=y → 原厂 dump 里就是 not set，techpack 的 conf 自己会给 =y
+          for s in QCOM_APR SOUNDWIRE; do
+            if grep -qE "^CONFIG_${s}=y$" out/.config; then
+              echo "::error::$s 不能内建（会和 techpack 的 apr/swr 符号冲突）"
+              exit 1
+            fi
+          done
+          echo "  OK QCOM_APR / SOUNDWIRE 未内建，与 techpack 的 apr/swr 不冲突"
           DSOFT=""
           for k in $DRV_SOFT; do
             grep -q "^CONFIG_${k}=y" out/.config || DSOFT="$DSOFT $k"
@@ -1857,6 +1927,41 @@ jobs:
           echo "===== 编出来的 DTB / DTBO ====="
           find out/arch/arm64/boot/dts/vendor \( -name '*.dtb' -o -name '*.dtbo' \) 2>/dev/null | head -50 || true
 
+      - name: 诊断 · 列出内建对象的重名符号（仅编译失败时自动跑）
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$BUILD_DIR" 2>/dev/null || { echo "没有 BUILD_DIR，跳过"; exit 0; }
+          for d in "$CLANG_DIR/bin" "$GITHUB_WORKSPACE"/toolchains/clang-repo/*/bin "$GITHUB_WORKSPACE"/toolchains/clang*/bin ; do
+            [ -d "$d" ] && export PATH="$d:$PATH"
+          done
+          NM=$(command -v llvm-nm || command -v nm || echo "")
+          if [ -z "$NM" ]; then echo "::warning::找不到 nm，跳过重名符号诊断"; exit 0; fi
+          echo "===== 扫描 out 下所有 built-in.a 的全局定义符号 ====="
+          LIST="$RUNNER_TEMP/sym.txt"
+          : > "$LIST"
+          find out -name 'built-in.a' -print0 2>/dev/null | while IFS= read -r -d '' a; do
+            "$NM" --defined-only --extern-only --no-demangle "$a" 2>/dev/null \
+              | awk -v A="$a" 'NF>=3 && $2 ~ /^[A-Za-z]$/ {print $3"\t"A}'
+          done >> "$LIST"
+          TOTAL=$(wc -l < "$LIST" | tr -d ' ')
+          echo "  共 $TOTAL 条全局定义"
+          DUP=$(cut -f1 "$LIST" | sort | uniq -d | grep . || true)
+          ND=$(printf '%s\n' "$DUP" | grep -c . || true)
+          if [ "${ND:-0}" -eq 0 ]; then
+            echo "::notice title=重名符号诊断::没有重名全局符号 —— 说明这次失败不是符号冲突引起的"
+            exit 0
+          fi
+          echo "===== 发现 $ND 个重名全局符号 ====="
+          printf '%s\n' "$DUP" | while read -r s; do
+            [ -n "$s" ] || continue
+            echo "★ $s"
+            awk -F'\t' -v S="$s" '$1==S{print "    "$2}' "$LIST"
+          done | head -400
+          SYMS=$(printf '%s\n' "$DUP" | tr '\n' ' ')
+          echo "::error title=重名符号诊断::$ND 个重名全局符号：$SYMS"
+
       - name: 核对驱动确实内建了（不是编成模块）
         if: ${{ inputs.enable_ksu }}
         shell: bash
@@ -1984,7 +2089,7 @@ jobs:
           echo "::notice title=警告共 ${WC} 条（前30）::$WS"
 
           # 3) 关键驱动是否参与编译
-          echo "::notice title=关键驱动编译记录::$(grep -E 'CC .*(adsprpc|q6v5|glink|smem|smp2p|pil|remoteproc|scm|mdt_loader|cdsp)' "$LOG" | head -40 || echo '(无)')"
+          echo "::notice title=关键驱动编译记录::$(grep -E '^[[:space:]]*CC[[:space:]]+.*[/_](adsprpc|apr|q6v5|glink|smem|smp2p|remoteproc|mdt_loader|cdsp|qcom_scm|msm_pil|subsystem_ramdump|scm)' "$LOG" | head -40 || echo '(无)')"
 
           # 3.5) 配置阶段的符号自检结果
           CFG="$RUNNER_TEMP/config.log"
@@ -2023,7 +2128,7 @@ jobs:
                     KSU_SUSFS_SUS_MAP KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SPOOF_UNAME \
                     KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
                     KSU_SUSFS_ENABLE_LOG KPM KALLSYMS KALLSYMS_ALL THREAD_INFO_IN_TASK \
-                    KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK; do
+                    KSU_KPROBES_HOOK; do
             grep -q "^CONFIG_${KV}=y" out/.config || KSUBAD="$KSUBAD $KV"
           done
           echo "::notice title=susfs/KPM 关键开关::未打开=[${KSUBAD:-无}]"
