@@ -61,7 +61,15 @@ name: "[A6] OPPO K10x k10x_5g (纯 5.4.233 + 47 驱动全内建 + Rancemxn 性�
 #     ksu_can_umount 让 Kbuild 的 grep -Eq "^static int can_umount" 失配，
 #     于是它又插一个没人用的 can_umount。
 #
-#  2. 【修·2026-10-11 重写】KernelSU hook 模式 —— 必须是 KSU_KPROBES_HOOK。
+#  2. 【修·2026-10-12】SukiSU Ultra 的钩子模式 —— 它【没有】KSU_KPROBES_HOOK。
+#     ★ 下面这一整段是 KernelSU-Next（工作流 A）的推理，对 SukiSU Ultra 不适用，
+#       仅作历史记录保留。SukiSU Ultra 唯一的钩子路线是
+#       kernel/Makefile L68-72：CONFIG_KSU_SUSFS=y -> using SUSFS_INLINE_HOOK，
+#       调用点由 susfs_inline_hook_patches.sh 写进 fs/exec.c 等 7 个文件。
+#       （2026-10-12 run 38206150892 因为误加 --enable KSU_KPROBES_HOOK 而挂：
+#        该符号在 builtin 源码里出现 0 次，olddefconfig 把它删掉 -> 断言失败。）
+#     ── 以下为 KernelSU-Next 的历史记录 ──
+#  （旧）KernelSU hook 模式 —— 必须是 KSU_KPROBES_HOOK。
 #     之前这里写着「5.4 必须用 KSU_SYSCALL_TABLE_HOOK」，是错的，直接导致
 #     面具首页显示「未集成」。证据链：
 #
@@ -1321,31 +1329,27 @@ jobs:
               --enable  KALLSYMS_ALL \
               --enable  KPM
 
-            # ── 关掉会打架的开关 ──
-            # KSU_MANUAL_HOOK / KSU_TRACEPOINT_HOOK 与 susfs 的内联钩子是互斥路线；
-            # 打开它们会让 susfs 的 hook 点走不到，面具显示「未集成」。
-            scripts/config --file out/.config \
-              --disable KSU_MANUAL_HOOK \
-              --disable KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
-              --disable KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
-              --disable KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-              --disable KSU_TRACEPOINT_HOOK \
-              --enable  KSU_KPROBES_HOOK
-            # ★ KSU_KPROBES_HOOK 靠 sys_enter/sys_exit 两个 tracepoint 抓系统调用。
-            #   这两个 tracepoint 定义在 include/trace/events/syscalls.h，
-            #   而该头文件只在 kernel/trace/trace_syscalls.c 里被 include，
-            #   那个文件又是 CONFIG_FTRACE_SYSCALLS 才编译。
-            #   本机 stock config 里它是 "not set" —— 必须补上，
-            #   否则 trace_sys_enter() 不存在，KSU 编不过。
-            #   注意：这只是 tracing 功能，不影响任何结构体布局 / ABI，
-            #   和防卡二屏那套（MODVERSIONS=n + vermagic）互不干扰。
+            # ★★★ 钩子机制：SukiSU Ultra 没有 KSU_KPROBES_HOOK / KSU_MANUAL_HOOK /
+            #     KSU_TRACEPOINT_HOOK 这些 Kconfig —— 那是 KernelSU-Next 的符号。
+            #     实测（整棵 builtin 源码 grep）：这些符号出现 0 次。
+            #     它唯一的钩子路线在 kernel/Makefile L68-72：
+            #         ifeq ($(CONFIG_KSU_SUSFS), y)
+            #         $(info -- SukiSU-Ultra: using SUSFS_INLINE_HOOK)
+            #     即【CONFIG_KSU_SUSFS=y 就等于选了 SUSFS_INLINE_HOOK】，
+            #     而内联钩子的调用点由第 16 步写进 fs/exec.c 等 7 个文件。
+            #     ★ 教训：曾经在这里 --enable KSU_KPROBES_HOOK，那个符号不存在，
+            #       olddefconfig 会静默删掉它，随后断言失败，编译根本跑不起来
+            #       （2026-10-12 run 38206150892 就是这么挂的）。
+            #     FTRACE_SYSCALLS 仍然要开：susfs 的 ksu_handle_sys_read 等
+            #     内联钩子依赖 syscall tracepoint 机制；它只是 tracing 功能，
+            #     不影响任何结构体布局 / ABI，和防卡二屏那套互不干扰。
             scripts/config --file out/.config \
               --enable FTRACE \
               --enable TRACEPOINTS \
               --enable FTRACE_SYSCALLS
 
             echo "  OK KSU + susfs v2.3.0 全特性(10 项) + KPM + KALLSYMS_ALL 已显式打开"
-            echo "  OK 已关闭 MANUAL_HOOK / TRACEPOINT_HOOK，确保 susfs 内联钩子生效"
+            echo "  OK 钩子路线 = SUSFS_INLINE_HOOK（由 CONFIG_KSU_SUSFS=y 决定）"
           fi
 
           # ★★★ 卡二屏真凶 ★★★
@@ -1627,22 +1631,27 @@ jobs:
             fi
             echo "  OK KSU=y + susfs 全特性 10 项 + KPM=y + KALLSYMS_ALL=y + THREAD_INFO_IN_TASK=y"
 
-            # ── hook 路线必须是 susfs 内联钩子 ──
-            for k in KSU_KPROBES_HOOK; do
-              if grep -q "^CONFIG_${k}=y" out/.config; then
-                echo "::error::CONFIG_${k}=y 会盖掉 susfs 的内联钩子，面具会显示「未集成」"; exit 1
-              fi
-            done
-            echo "  OK MANUAL_HOOK / TRACEPOINT_HOOK 均未开启（走 susfs 内联钩子）"
-
-            # ★ KSU_KPROBES_HOOK 必须显式 =y —— 不能只靠 Kconfig choice 的默认值。
-            #   钩子模式不对 = 面具显示「未集成」（2026-10-11 run 38148624571 的根因）。
-            if ! grep -q "^CONFIG_KSU_KPROBES_HOOK=y" out/.config; then
-              echo "::error::CONFIG_KSU_KPROBES_HOOK 不是 y！钩子模式不对，面具会显示「未集成」"
-              grep -E "CONFIG_KSU_(KPROBES|MANUAL|TRACEPOINT)" out/.config || true
+            # ── 钩子路线：SukiSU Ultra 靠 CONFIG_KSU_SUSFS=y 选 SUSFS_INLINE_HOOK ──
+            #    （它根本没有 KSU_KPROBES_HOOK / MANUAL / TRACEPOINT 这些选项）
+            if ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
+              echo "::error::CONFIG_KSU_SUSFS 不是 y！SukiSU Ultra 就选不到 SUSFS_INLINE_HOOK，面具会显示「未集成」"
               exit 1
             fi
-            echo "  OK KSU_KPROBES_HOOK=y（sys_enter/sys_exit tracepoint 钩子）"
+            echo "  OK CONFIG_KSU_SUSFS=y -> kernel/Makefile 会打印 using SUSFS_INLINE_HOOK"
+            # ── 内联钩子的调用点必须真的在源码里（第 16 步写的）──
+            HOOKMISS=""
+            for spec in "fs/exec.c:ksu_handle_execveat" "fs/open.c:ksu_handle_faccessat" \
+                        "fs/stat.c:ksu_handle_stat" "fs/read_write.c:ksu_handle_sys_read" \
+                        "kernel/reboot.c:ksu_handle_sys_reboot" \
+                        "kernel/sys.c:ksu_handle_setresuid" \
+                        "drivers/input/input.c:ksu_handle_input_handle_event"; do
+              hf="${spec%%:*}"; hs="${spec##*:}"
+              grep -q "$hs" "$hf" || HOOKMISS="$HOOKMISS $hf($hs)"
+            done
+            if [ -n "$HOOKMISS" ]; then
+              echo "::error::susfs 内联钩子调用点缺失：$HOOKMISS"; exit 1
+            fi
+            echo "  OK 内联钩子调用点齐全（execveat/faccessat/stat/sys_read/sys_reboot/input）"
 
             # ── kprobes 模式还要确认 syscall tracepoint 真的在 ──
             if ! grep -q "^CONFIG_FTRACE_SYSCALLS=y" out/.config; then
@@ -2127,8 +2136,7 @@ jobs:
           for KV in KSU KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
                     KSU_SUSFS_SUS_MAP KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SPOOF_UNAME \
                     KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-                    KSU_SUSFS_ENABLE_LOG KPM KALLSYMS KALLSYMS_ALL THREAD_INFO_IN_TASK \
-                    KSU_KPROBES_HOOK; do
+                    KSU_SUSFS_ENABLE_LOG KPM KALLSYMS KALLSYMS_ALL THREAD_INFO_IN_TASK; do
             grep -q "^CONFIG_${KV}=y" out/.config || KSUBAD="$KSUBAD $KV"
           done
           echo "::notice title=susfs/KPM 关键开关::未打开=[${KSUBAD:-无}]"
