@@ -1279,8 +1279,27 @@ jobs:
           #
           # 手机 dump 的 k10x_defconfig 里这些要么没有、要么是 =m，所以必须显式打开。
           # 对照 Rancemxn 的 arch/arm64/configs/sm6375_defconfig（他有 47 个 =m）。
-          DRV_KCONFIG="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT SOUNDWIRE_WCD_CTRL"
-          echo "===== A6b：打开 12 个 Kconfig 级驱动（QCOM_APR/SOUNDWIRE 已排除）====="
+                    # ★ 2026-10-12 补：Rancemxn 的 47 个 =m 里有 8 个两条路都没走到，
+          #   其中 7 个是【手机 dump 里确实 =m 的真实 Kconfig 项】，会停在 =m
+          #   而我们只编 Image.gz/Image，编不出 .ko，233 内核又加载不了 254 的原厂
+          #   .ko -> 这 7 个驱动就真的缺了（蓝牙/功耗温控/WiFi 天线全在里面）。
+          #   第 8 个 QCOM_APR 必须继续排除（与 techpack 的 apr 重名）。
+          #   它们父依赖实测全是 =y：BT/BT_HCIUART/BT_HCIUART_QCA/RFKILL/
+          #   SLIMBUS/SLIMBUS_MSM_NGD/CFG80211/WLAN，所以 =y 不会被 olddefconfig 打回。
+          #   ★ K10x 没有红外硬件，后 2 个 IR 驱动属于「编了也不用」，
+          #     但原厂 /vendor 里确实有这两个 .ko（OPPO 统一 vendor 镜像），
+          #     所以照样内建，保持和原厂一致、避免任何内核内部符号缺失。
+                    # ★ 2026-10-12 第七轮补（run 38208520995 链接失败暴露）：
+          #   · SOUNDWIRE 必须开！它提供 swr_driver_register / swr_disconnect_port /
+          #     swr_reset_device 等 7 个函数，wcd937x/wcd938x 编解码器直接调用。
+          #     上一轮我误以为它会重名而删掉 —— 实际重名的只有 QCOM_APR（apr_send_pkt），
+          #     SOUNDWIRE 在首轮 A5/A6 的报错里根本没出现过。删错了，现在加回来。
+          #   · OPPO secureguard 系列必须开！它提供 get_secureType()，
+          #     arch/arm64/kernel/secureguard/keventupload 和触摸/传感器路径都会调。
+          #     原厂 dump 里这 8 个全是 =y，而 Rancemxn 的 sm6375_defconfig 全 =n
+          #     —— 这是他和原厂最实质的差异之一，也是我们链接失败的直接原因。
+          DRV_KCONFIG="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT SOUNDWIRE_WCD_CTRL BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
+          echo "===== A6b：打开 28 个 Kconfig 级驱动（QCOM_APR/SOUNDWIRE 已排除）====="
           DRV_OK=0
           for s in $DRV_KCONFIG; do
             if scripts/config --file out/.config --enable "$s" 2>/dev/null; then
@@ -1290,8 +1309,8 @@ jobs:
               echo "  ⚠ $s 不在这个 Kconfig 树里，跳过"
             fi
           done
-          echo "  已处理 $DRV_OK / 12 个"
-          echo "::notice title=全部内建(配置)::12 个 Kconfig 级驱动已 --enable（QCOM_APR/SOUNDWIRE 已排除，避免与 techpack 的 apr/swr 符号冲突），techpack 驱动已在 conf 里改成 =y"
+          echo "  已处理 $DRV_OK / 28 个"
+          echo "::notice title=全部内建(配置)::28 个 Kconfig 级驱动已 --enable（QCOM_APR/SOUNDWIRE 已排除，避免与 techpack 的 apr/swr 符号冲突），techpack 驱动已在 conf 里改成 =y"
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
             # 前置断言：KSU 步骤被跳过/失败时立刻报清楚，别等到 olddefconfig 之后
@@ -1689,8 +1708,8 @@ jobs:
           #   DISPLAY_BUILD（display）
           # 其余 8 个必须靠 scripts/config 写进 .config。
           # scripts/config 不检查 Kconfig 是否存在 —— 不存在的项会被 olddefconfig 静默丢掉。
-          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT"
-          DRV_SOFT="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD SOUNDWIRE_WCD_CTRL"
+          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE"
+          DRV_SOFT="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD SOUNDWIRE_WCD_CTRL OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
           DMISS=""
           for k in $DRV_HARD; do
             grep -q "^CONFIG_${k}=y" out/.config || DMISS="$DMISS $k"
@@ -1700,7 +1719,7 @@ jobs:
             echo "（它们在手机 dump 里确认存在，被丢掉说明依赖不满足或 Kconfig 没被 source 进来）"
             exit 1
           fi
-          echo "  OK 4 个确认的 Kconfig 驱动在 olddefconfig 之后仍 =y"
+          echo "  OK 9 个确认的 Kconfig 驱动在 olddefconfig 之后仍 =y（含蓝牙/WiFi天线/功耗温控）"
           # ★ A6b：QCOM_APR / SOUNDWIRE 必须【不】内建
           #   QCOM_APR=y  → drivers/soc/qcom/apr.o 与 techpack/audio/ipc/apr.o
           #                 同时提供 apr_send_pkt → duplicate symbol（A5/A6 首轮）
