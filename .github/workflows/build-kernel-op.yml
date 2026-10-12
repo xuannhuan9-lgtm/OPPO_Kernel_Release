@@ -1298,8 +1298,8 @@ jobs:
           #     arch/arm64/kernel/secureguard/keventupload 和触摸/传感器路径都会调。
           #     原厂 dump 里这 8 个全是 =y，而 Rancemxn 的 sm6375_defconfig 全 =n
           #     —— 这是他和原厂最实质的差异之一，也是我们链接失败的直接原因。
-          DRV_KCONFIG="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT SOUNDWIRE_WCD_CTRL BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
-          echo "===== A6b：打开 28 个 Kconfig 级驱动（QCOM_APR/SOUNDWIRE 已排除）====="
+          DRV_KCONFIG="QCA_CLD_WLAN GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT SOUNDWIRE_WCD_CTRL BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
+          echo "===== A6b：打开 27 个 Kconfig 级驱动（QCOM_APR/SOUNDWIRE 已排除）====="
           DRV_OK=0
           for s in $DRV_KCONFIG; do
             if scripts/config --file out/.config --enable "$s" 2>/dev/null; then
@@ -1309,8 +1309,8 @@ jobs:
               echo "  ⚠ $s 不在这个 Kconfig 树里，跳过"
             fi
           done
-          echo "  已处理 $DRV_OK / 28 个"
-          echo "::notice title=全部内建(配置)::28 个 Kconfig 级驱动已 --enable（QCOM_APR/SOUNDWIRE 已排除，避免与 techpack 的 apr/swr 符号冲突），techpack 驱动已在 conf 里改成 =y"
+          echo "  已处理 $DRV_OK / 27 个"
+          echo "::notice title=全部内建(配置)::27 个 Kconfig 级驱动已 --enable（只排除 QCOM_APR，避开 techpack 的 apr 重名；SOUNDWIRE 必须保留，它提供 swr_* 函数），techpack 驱动已在 conf 里改成 =y"
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
             # 前置断言：KSU 步骤被跳过/失败时立刻报清楚，别等到 olddefconfig 之后
@@ -1708,7 +1708,7 @@ jobs:
           #   DISPLAY_BUILD（display）
           # 其余 8 个必须靠 scripts/config 写进 .config。
           # scripts/config 不检查 Kconfig 是否存在 —— 不存在的项会被 olddefconfig 静默丢掉。
-          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG QCA_CLD_WLAN RMNET"
+          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG QCA_CLD_WLAN"
           DRV_SOFT="GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD SOUNDWIRE_WCD_CTRL OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
           DMISS=""
           for k in $DRV_HARD; do
@@ -1719,7 +1719,7 @@ jobs:
             echo "（它们在手机 dump 里确认存在，被丢掉说明依赖不满足或 Kconfig 没被 source 进来）"
             exit 1
           fi
-          echo "  OK 20 个硬性 Kconfig 驱动在 olddefconfig 之后仍 =y（含蓝牙x2/WiFi天线/功耗温控/SOUNDWIRE/secureguard 全套/WiFi/网络）"
+          echo "  OK 19 个硬性 Kconfig 驱动在 olddefconfig 之后仍 =y（含蓝牙x2/WiFi天线/功耗温控/SOUNDWIRE/secureguard 全套/WiFi/网络）"
           # ★ A6b：只有 QCOM_APR 必须【不】内建 —— SOUNDWIRE 反过来【必须】内建
           #   QCOM_APR=y  → drivers/soc/qcom/apr.o 与 techpack/audio/ipc/apr.o
           #                 同时提供 apr_send_pkt → duplicate symbol（A5/A6 首轮）
