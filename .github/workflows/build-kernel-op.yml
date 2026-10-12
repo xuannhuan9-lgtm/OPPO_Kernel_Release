@@ -1708,8 +1708,8 @@ jobs:
           #   DISPLAY_BUILD（display）
           # 其余 8 个必须靠 scripts/config 写进 .config。
           # scripts/config 不检查 Kconfig 是否存在 —— 不存在的项会被 olddefconfig 静默丢掉。
-          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE"
-          DRV_SOFT="QCA_CLD_WLAN RMNET GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD SOUNDWIRE_WCD_CTRL OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
+          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA SOUNDWIRE OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG QCA_CLD_WLAN RMNET"
+          DRV_SOFT="GSI RNDIS_IPA IPA_CLIENTS_MANAGER MSM_VIDC_V4L2 DISPLAY_BUILD SOUNDWIRE_WCD_CTRL OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
           DMISS=""
           for k in $DRV_HARD; do
             grep -q "^CONFIG_${k}=y" out/.config || DMISS="$DMISS $k"
@@ -1719,18 +1719,25 @@ jobs:
             echo "（它们在手机 dump 里确认存在，被丢掉说明依赖不满足或 Kconfig 没被 source 进来）"
             exit 1
           fi
-          echo "  OK 9 个确认的 Kconfig 驱动在 olddefconfig 之后仍 =y（含蓝牙/WiFi天线/功耗温控）"
-          # ★ A6b：QCOM_APR / SOUNDWIRE 必须【不】内建
+          echo "  OK 20 个硬性 Kconfig 驱动在 olddefconfig 之后仍 =y（含蓝牙x2/WiFi天线/功耗温控/SOUNDWIRE/secureguard 全套/WiFi/网络）"
+          # ★ A6b：只有 QCOM_APR 必须【不】内建 —— SOUNDWIRE 反过来【必须】内建
           #   QCOM_APR=y  → drivers/soc/qcom/apr.o 与 techpack/audio/ipc/apr.o
           #                 同时提供 apr_send_pkt → duplicate symbol（A5/A6 首轮）
-          #   SOUNDWIRE=y → 原厂 dump 里就是 not set，techpack 的 conf 自己会给 =y
-          for s in QCOM_APR SOUNDWIRE; do
+          #   SOUNDWIRE   → 【必须 =y】！它提供 swr_driver_register / swr_disconnect_port /
+          #                 swr_reset_device / swr_set_device_group / swr_remove_device /
+          #                 swr_device_down / swr_get_logical_dev_num 这 7 个函数，
+          #                 wcd937x/wcd938x 编解码器直接调用。
+          #                 run 38208520995 就是因为它 =n 而链接失败（undefined symbol: swr_*）。
+          #                 注意 SOUNDWIRE_WCD_CTRL 是 techpack 的 export，和它是两回事。
+          for s in QCOM_APR; do
             if grep -qE "^CONFIG_${s}=y$" out/.config; then
-              echo "::error::$s 不能内建（会和 techpack 的 apr/swr 符号冲突）"
+              echo "::error::$s 不能内建（会和 techpack 的 apr 符号冲突）"
               exit 1
             fi
           done
-          echo "  OK QCOM_APR / SOUNDWIRE 未内建，与 techpack 的 apr/swr 不冲突"
+          grep -q '^CONFIG_SOUNDWIRE=y' out/.config \
+            || { echo "::error::CONFIG_SOUNDWIRE 不是 y！swr_* 函数没编进来，wcd937x/wcd938x 会链接失败"; exit 1; }
+          echo "  OK QCOM_APR 未内建（避开 apr 重名）| SOUNDWIRE 已内建（提供 swr_* 函数）"
           DSOFT=""
           for k in $DRV_SOFT; do
             grep -q "^CONFIG_${k}=y" out/.config || DSOFT="$DSOFT $k"
