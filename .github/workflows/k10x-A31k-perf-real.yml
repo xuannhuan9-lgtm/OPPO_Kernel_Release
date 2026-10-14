@@ -62,6 +62,10 @@ on:
         description: '面具包名。留空=内核自动扫描认领（推荐）。SukiSU Ultra 的 spoofed 版包名随机，要填得先用 adb 查真实包名'
         type: string
         default: ''
+      ksu_version_override:
+        description: '★通常留空★ 强制内核上报的 KernelSU 版本号。留空 = 跟随上游（推荐，永远用最新）。只有管理器 KPM 页选文件没反应/ANR 时才填 —— 那是内核版本号与管理器 versionCode 失配，填管理器的 versionCode 即修。查法：dumpsys package com.sukisu.ultra | grep versionCode'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -499,6 +503,58 @@ jobs:
             || { echo "::error::UAPI 版本不是 5"; grep -n 'KERNEL_SU_UAPI_VERSION' "$UAPI_H"; exit 1; }
           echo "  UAPI 改后: $(grep -n 'KERNEL_SU_UAPI_VERSION' "$UAPI_H" | head -1)"
           echo "  ✓ UAPI 已对齐为 5（面具侧的期望值）"
+
+          # ================================================================
+          # ★上游兼容补丁★ TRACK_THRONE_FORCE_SYNCHRONOUS
+          # ----------------------------------------------------------------
+          # 症状（A31k #5 run 38550611497 实测失败）：
+          #   ../drivers/kernelsu/manager/pkg_observer.c:22:18:
+          #     error: use of undeclared identifier 'TRACK_THRONE_FORCE_SYNCHRONOUS'
+          #
+          # 原因：上游 commit c89592068e 把 track_throne(false) 换成延迟执行，
+          #   新函数里写了 track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)，
+          #   但该宏是别的分支才有的，builtin 分支没定义 ⇒ 上游自己编挂了。
+          #
+          # 修法：用 sed 在 include 行后插入兜底定义（旧版传的就是 false，语义一致）。
+          #   全程 bash，不用 heredoc / 不用 python，避免 YAML 缩进陷阱。
+          # ================================================================
+          POB="$BUILD_DIR/drivers/kernelsu/manager/pkg_observer.c"
+          if [ ! -f "$POB" ]; then
+            echo "::error::pkg_observer.c 不存在：$POB"
+            find "$BUILD_DIR/drivers/kernelsu" -name 'pkg_observer*' 2>/dev/null | head
+            exit 1
+          fi
+
+          if grep -q 'define *TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB"; then
+            echo "  (上游已自己定义，无需补丁)"
+          elif ! grep -q 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB"; then
+            echo "  (上游没用这个宏，无需补丁)"
+          else
+            echo "  ★上游用了 TRACK_THRONE_FORCE_SYNCHRONOUS 但没定义 ⇒ 打兜底补丁★"
+            # 在 #include "pkg_observer_compat.h" 的下一行插入
+            MARK='#include "pkg_observer_compat.h"'
+            LN=$(grep -n -F "$MARK" "$POB" | head -1 | cut -d: -f1)
+            [ -n "$LN" ] || LN=1
+            echo "    锚点在第 $LN 行"
+            {
+              head -n "$LN" "$POB"
+              printf '\n'
+              printf '// LOCAL FALLBACK: upstream c89592068e uses this macro, builtin does not define it.\n'
+              printf '// Old code was track_throne(false); identical semantics.\n'
+              printf '#ifndef TRACK_THRONE_FORCE_SYNCHRONOUS\n'
+              printf '#define TRACK_THRONE_FORCE_SYNCHRONOUS false\n'
+              printf '#endif\n'
+              tail -n +$((LN + 1)) "$POB"
+            } > "$POB.tmp"
+            mv -f "$POB.tmp" "$POB"
+            echo "    --- 插入结果 ---"
+            grep -n -B2 -A6 'define TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB" | head -14
+          fi
+
+          # 自检：最终必须存在定义，否则一定编不过
+          grep -q 'define *TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB" \
+            || { echo "::error::兜底宏最终不存在，编译仍会失败"; grep -n 'TRACK_THRONE' "$POB" | head; exit 1; }
+          echo "  ✓ TRACK_THRONE_FORCE_SYNCHRONOUS 兜底已就绪"
 
           # KSU_VERSION 本身不动（保持上游 VERSION_BASE=40000，现在算出来 40971）。
           if [ -f kernel/Makefile ]; then
@@ -1938,11 +1994,16 @@ jobs:
           else
             echo "::notice title=KernelSU 面具包名::（未指定，走扫描+签名校验；若面具显示未集成就填上）"
           fi
-          if [ -n "" ]; then
-            EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_VERSION_OVERRIDE="
-            echo "::notice title=KernelSU 版本号::强制上报 "
+          if [ -n "${{ inputs.ksu_version_override }}" ]; then
+            EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_VERSION_OVERRIDE=${{ inputs.ksu_version_override }}"
+            echo "::notice title=KernelSU 版本号::★强制上报 ${{ inputs.ksu_version_override }}★（覆盖按 git 提交数算的值）"
+            echo "  原因：KSU_VERSION = 40000 + MAINCNT - 2815，MAINCNT 是【上游 KernelSU 仓库】的提交数，"
+            echo "        上游一更新这个数就漂移 ⇒ 与已装管理器 versionCode 失配 ⇒ KPM 页选文件没反应/ANR。"
+            echo "        钉死成管理器的 versionCode 即匹配。"
           else
             echo "::notice title=KernelSU 版本号::（自动，按 git 提交数算）"
+            echo "  ⚠ 若管理器 KPM 页选文件没反应或卡死，就是这个数和管理器 versionCode 对不上。"
+            echo "     解决：重新 dispatch 并填 ksu_version_override = 管理器的 versionCode"
           fi
           if [ "${{ inputs.build_dtbs }}" = "true" ]; then
             TARGETS="$TARGETS dtbs"
