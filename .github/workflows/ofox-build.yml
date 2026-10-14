@@ -30,11 +30,12 @@ on:
   workflow_dispatch:
     inputs:
       fox_branch:
-        description: '橙狐/源码分支。默认值 fox_14.1 表示「按序自动尝试」：fox_14.1 → fox_13.1 → fox_12.1 → fox_11.0（目标机是 Android 14，优先同代以避免库版本冲突）。若你显式选其它值，则只尝试那一个分支。twrp_* 分支用于 manifest_source=twrp_minimal（GitHub 上，不依赖 GitLab）'
+        description: '★橙狐官方脚本要【不带 fox_ 前缀的版本号】★（脚本内部自己拼 fox_）。默认 fox_14.1 = 按序尝试 14.1 → 13.1 → 16.0 → 12.1 → 11.0（14.1 与目标机同为 Android 14，首选）。写 fox_14.1 或 14.1 都可以，会自动去掉前缀。显式选其它值则只试那一个。twrp_* 用于 manifest_source=twrp_minimal（GitHub，不依赖 GitLab）'
         type: choice
         options:
           - fox_14.1
           - fox_13.1
+          - fox_16.0
           - fox_12.1
           - fox_11.0
           - twrp-14.1
@@ -159,7 +160,7 @@ jobs:
           echo "$HOME/bin" >> "$GITHUB_PATH"
           "$HOME/bin/repo" --version
 
-      - name: 同步橙狐源码（GitLab，官方 sync 脚本优先）
+      - name: 同步橙狐源码（GitLab，官方脚本 + 版本号，非 fox_ 前缀）
         if: env.MANIFEST_SOURCE == 'orangefox'
         run: |
           set -o pipefail
@@ -168,26 +169,36 @@ jobs:
           cd "$GITHUB_WORKSPACE/fox_src"
 
           # ================================================================
-          # 候选分支：默认按序尝试；用户显式指定非默认值时只试它
+          # ★关键★ 橙狐官方同步脚本要的是【不带 fox_ 前缀的版本号】！
+          #
+          #   官方 Usage（sync 仓库里 orangefox_sync.sh 自带）：
+          #     orangefox_sync.sh --branch 16.0 --path ~/OrangeFox_16.0
+          #     orangefox_sync.sh --branch 14.1 --path ~/OrangeFox_14.1
+          #     orangefox_sync.sh --branch 12.1 --path ~/OrangeFox_12.1
+          #
+          #   脚本内部自己拼 fox_ 前缀 ⇒ 传 `fox_14.1` 会得到
+          #     "fatal: couldn't find remote ref refs/heads/fox_14.1"
+          #   这正是 run #4 四个分支全失败的原因（GitLab 其实是通的）。
           # ================================================================
-          DEFAULT_BRANCHES="fox_14.1 fox_13.1 fox_12.1 fox_11.0"
+          strip_prefix() {
+            # fox_14.1 / FOX_14.1 / fox-14.1 → 14.1 ；已是 14.1 则原样
+            echo "$1" | sed -E 's/^[Ff][Oo][Xx][_-]?//'
+          }
+
+          DEFAULT_VERSIONS="14.1 13.1 16.0 12.1 11.0"
           if [ "$FOX_BRANCH" = "fox_14.1" ]; then
-            CANDIDATES="$DEFAULT_BRANCHES"
-            echo "::notice::使用默认候选序列：$CANDIDATES"
+            CANDIDATES="$DEFAULT_VERSIONS"
+            echo "::notice::使用默认候选版本序列（不带前缀）：$CANDIDATES"
           else
-            CANDIDATES="$FOX_BRANCH"
-            echo "::notice::用户显式指定分支，只尝试：$CANDIDATES"
+            CANDIDATES="$(strip_prefix "$FOX_BRANCH")"
+            echo "::notice::用户显式指定，只尝试版本：$CANDIDATES"
           fi
 
           # ================================================================
-          # 1) 网络 / 分支 预检（全部打印，便于诊断）
+          # 1) 连通性预检 + ls-remote 真实 ref 发现
+          #    每条都写成独立 ::error:: 注解 —— 注解是远程唯一能看到的信息
           # ================================================================
-          # 预检结果逐条打成独立 ::error:: 注解
-          # ★重要★：GitHub 的注解来自 ::error::；放进 ::group:: 或只 echo 到 stdout
-          # 都不会出现在注解列表里。所以这里是「一条 URL = 一条注解」。
-          echo "::error::预检开始：候选分支 = $CANDIDATES"
           probe_ann() {
-            # $1=要打印的描述行  $2=URL
             local code
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -L "$2" 2>/dev/null || echo "000")
             echo "::error::$1 [$code] $2"
@@ -195,144 +206,186 @@ jobs:
           }
 
           GL_OK=1
-          probe_ann "预检" "https://gitlab.com/OrangeFox/manifest.git/info/refs?service=git-upload-pack" || GL_OK=0
-          probe_ann "预检" "https://gitlab.com/OrangeFox/sync.git/info/refs?service=git-upload-pack" || GL_OK=0
+          probe_ann "预检(git-upload-pack)" "https://gitlab.com/OrangeFox/manifest.git/info/refs?service=git-upload-pack" || GL_OK=0
+          probe_ann "预检(git-upload-pack)" "https://gitlab.com/OrangeFox/sync.git/info/refs?service=git-upload-pack" || GL_OK=0
 
-          for BR in $CANDIDATES; do
-            probe_ann "预检 manifest 分支 $BR" \
-              "https://gitlab.com/OrangeFox/manifest/-/raw/${BR}/default.xml" || true
+          echo "::error::预检结论：GitLab 可达性 GL_OK=$GL_OK（1=可达，0=不可达）"
+          echo "::error::候选版本(不带前缀) = $CANDIDATES"
+
+          # ---- ls-remote：把 manifest / sync 的真实分支全列出来 ----
+          for REPO in manifest sync; do
+            URL="https://gitlab.com/OrangeFox/${REPO}.git"
+            echo "::error::ls-remote $REPO: 开始读取 $URL"
+            LSRC=0
+            LSOUT=$(git ls-remote --heads "$URL" 2>&1) || LSRC=$?
+            if [ "$LSRC" -ne 0 ]; then
+              echo "::error::ls-remote $REPO: 失败(rc=$LSRC) —— $(echo "$LSOUT" | head -1)"
+            else
+              N=$(echo "$LSOUT" | wc -l)
+              echo "::error::ls-remote $REPO: 成功，共 $N 个分支"
+              echo "$LSOUT" | awk '{print $2}' | sed 's#refs/heads/##' | tr '\n' ' ' > /tmp/refs-$REPO.txt
+              echo "::error::ls-remote $REPO: 分支列表 = $(cat /tmp/refs-$REPO.txt)"
+              # 再逐条打出来，避免一行太长被截断
+              echo "$LSOUT" | awk '{print $2}' | sed 's#refs/heads/##' | while IFS= read -r r; do
+                [ -z "$r" ] && continue
+                echo "::error::ls-remote $REPO 分支: $r"
+              done
+            fi
           done
 
+          # ---- 从 ls-remote 结果里挑出真正存在的目标分支 ----
+          # 官方分支名是 fox_<ver>，脚本要的是 <ver>。所以：
+          #   真实 ref = fox_<ver>  → 传给脚本的是 <ver>
+          DISCOVERED=""
+          if [ -f /tmp/refs-manifest.txt ]; then
+            for V in $CANDIDATES; do
+              if grep -qE "(^| )fox_${V}( |$)" /tmp/refs-manifest.txt; then
+                DISCOVERED="$DISCOVERED $V"
+              fi
+            done
+          fi
+          if [ -n "$DISCOVERED" ]; then
+            echo "::error::发现可用版本（manifest 里存在 fox_<版本>）= $DISCOVERED"
+            CANDIDATES="$DISCOVERED"
+          else
+            echo "::error::未能在 manifest 的 ls-remote 结果里匹配到候选版本 $CANDIDATES"
+            echo "::error::将按原候选顺序继续尝试（可能仍然失败）"
+          fi
+
           if [ "$GL_OK" != "1" ]; then
-            echo "::error::GitLab 不可达（manifest/sync 仓库的 git-upload-pack 预检失败）"
-            echo "::error::这通常是 runner 出网策略或 GitLab 侧限流导致，与分支名无关"
-            echo "::error::建议改用：manifest_source=twrp_minimal + fox_branch=twrp-14.1"
+            echo "::error::★结论：GitLab 不可达★（依据：上面两条 git-upload-pack 预检非 200/000）"
+            echo "::error::这与分支名无关，请改用 manifest_source=twrp_minimal + fox_branch=twrp-14.1"
+          else
+            echo "::error::★结论：GitLab 可达★，若下面仍失败则是【分支/ref 不存在】，不是网络问题"
           fi
 
           # ================================================================
-          # 2) 逐个候选分支尝试（官方 sync 脚本优先，repo init 回退）
+          # 2) 逐个候选版本尝试（官方脚本优先，repo init 回退）
           # ================================================================
           ROOT=""
           USED_BRANCH=""
           SYNC_SCRIPT=""
+          FIRST=1
 
-          for BR in $CANDIDATES; do
+          for V in $CANDIDATES; do
             echo ""
-            echo "::group::尝试分支 $BR"
+            echo "::group::尝试版本 $V（官方脚本参数 --branch $V）"
             rm -rf "$SRC_ROOT"
             mkdir -p "$SRC_ROOT"
 
-            # ---- 方式 A：官方 sync 脚本（首选）----
             OK=0
             rm -rf /tmp/ofox-sync
             if git clone --depth=1 https://gitlab.com/OrangeFox/sync.git /tmp/ofox-sync 2>&1 | tail -5; then
-              echo "  sync 仓库克隆成功，内容："
-              ls -la /tmp/ofox-sync | head -20
-
+              echo "  sync 仓库克隆成功"
               SYNC_SCRIPT=""
               for cand in /tmp/ofox-sync/orangefox_sync.sh /tmp/ofox-sync/sync.sh; do
                 [ -f "$cand" ] && SYNC_SCRIPT="$cand" && break
               done
 
               if [ -n "$SYNC_SCRIPT" ]; then
-                echo "  使用官方脚本: $SYNC_SCRIPT"
                 chmod +x "$SYNC_SCRIPT"
-                echo "  执行: $SYNC_SCRIPT --branch $BR --path $SRC_ROOT"
-                if "$SYNC_SCRIPT" --branch "$BR" --path "$SRC_ROOT" > /tmp/sync-$BR.log 2>&1; then
-                  tail -20 /tmp/sync-$BR.log
+                # 第一次尝试加 --debug，便于看脚本内部到底做了什么
+                if [ "$FIRST" = "1" ]; then
+                  ARGS="--branch $V --path $SRC_ROOT --debug"
+                else
+                  ARGS="--branch $V --path $SRC_ROOT"
+                fi
+                echo "  执行: $SYNC_SCRIPT $ARGS"
+                if "$SYNC_SCRIPT" $ARGS > /tmp/sync-$V.log 2>&1; then
+                  tail -20 /tmp/sync-$V.log
                   [ -f "$SRC_ROOT/build/envsetup.sh" ] && OK=1
                 else
                   echo "  !! 官方脚本失败，报错尾部 20 行："
-                  tail -20 /tmp/sync-$BR.log
-                  echo "::group::分支 $BR 官方脚本报错尾 3 行"
+                  tail -20 /tmp/sync-$V.log
                   while IFS= read -r l; do
                     [ -z "$l" ] && continue
-                    echo "::error::分支 $BR 报错(官方脚本): $l"
-                  done < <(tail -3 /tmp/sync-$BR.log 2>/dev/null)
-                  echo "::endgroup::"
+                    echo "::error::版本 $V 报错(官方脚本): $l"
+                  done < <(tail -3 /tmp/sync-$V.log 2>/dev/null)
                 fi
               else
                 echo "  !! sync 仓库里没有 orangefox_sync.sh / sync.sh"
-                ls -la /tmp/ofox-sync
-                echo "::error::分支 $BR 报错(官方脚本): sync 仓库里没有 orangefox_sync.sh / sync.sh"
+                echo "::error::版本 $V 报错(官方脚本): sync 仓库里没有 orangefox_sync.sh / sync.sh"
               fi
             else
               echo "  !! sync 仓库克隆失败"
-              echo "::error::分支 $BR 报错(git clone): 无法克隆 https://gitlab.com/OrangeFox/sync.git"
+              echo "::error::版本 $V 报错(git clone): 无法克隆 https://gitlab.com/OrangeFox/sync.git"
             fi
 
-            # ---- 方式 B：repo init + repo sync（回退）----
+            # ---- 回退：repo init 用真实存在的 ref 名 fox_<ver> ----
             if [ "$OK" != "1" ]; then
-              echo "  ---- 回退到 repo init -u manifest.git -b $BR ----"
+              echo "  ---- 回退到 repo init -b fox_$V ----"
               cd "$SRC_ROOT"
               if "$HOME/bin/repo" init -u https://gitlab.com/OrangeFox/manifest.git \
-                     -b "$BR" --depth=1 --no-repo-verify -q 2>&1 | tail -10; then
+                     -b "fox_$V" --depth=1 --no-repo-verify -q 2>&1 | tail -10; then
                 if "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags \
-                       > /tmp/reposync-$BR.log 2>&1; then
-                  tail -20 /tmp/reposync-$BR.log
+                       > /tmp/reposync-$V.log 2>&1; then
+                  tail -20 /tmp/reposync-$V.log
                   [ -f build/envsetup.sh ] && OK=1
                 else
                   echo "  !! repo sync 失败，报错尾部 20 行："
-                  tail -20 /tmp/reposync-$BR.log
-                  echo "::group::分支 $BR repo sync 报错尾 3 行"
+                  tail -20 /tmp/reposync-$V.log
                   while IFS= read -r l; do
                     [ -z "$l" ] && continue
-                    echo "::error::分支 $BR 报错(repo sync): $l"
-                  done < <(tail -3 /tmp/reposync-$BR.log 2>/dev/null)
-                  echo "::endgroup::"
+                    echo "::error::版本 $V 报错(repo sync): $l"
+                  done < <(tail -3 /tmp/reposync-$V.log 2>/dev/null)
                 fi
               else
-                echo "  !! repo init 失败（该分支可能不存在）"
-                echo "::error::分支 $BR 报错(repo init): 该分支可能不存在或 manifest 不可达"
+                echo "  !! repo init 失败（refs/heads/fox_$V 可能不存在）"
+                echo "::error::版本 $V 报错(repo init): refs/heads/fox_$V 可能不存在"
               fi
               cd "$GITHUB_WORKSPACE/fox_src"
             fi
 
             if [ "$OK" = "1" ]; then
               ROOT="$SRC_ROOT"
-              USED_BRANCH="$BR"
-              echo "::notice::✓ 分支 $BR 同步成功"
+              USED_BRANCH="$V"
+              echo "::notice::✓ 版本 $V 同步成功"
               echo "::endgroup::"
               break
             fi
 
-            echo "::warning::分支 $BR 同步失败"
+            echo "::warning::版本 $V 同步失败"
             echo "::endgroup::"
+            FIRST=0
           done
 
           # ================================================================
           # 3) 结果处理
           # ================================================================
           if [ -z "$ROOT" ]; then
-            echo "::error::所有候选分支都同步失败（试过: $CANDIDATES）。"
-            echo "::error::可能原因："
-            echo "::error::  1) GitLab 不可达（看上面预检的 http_code）"
-            echo "::error::  2) 这些分支都不存在"
-            echo "::error::  3) manifest 引用的子项目拉取失败（repo sync 报错见上）"
-            echo "::error::解决办法：改用 manifest_source=twrp_minimal + fox_branch=twrp-14.1"
-            echo "::error::（minimal-manifest-twrp 托管在 GitHub，不依赖 GitLab）"
-            for BR in $CANDIDATES; do
-              echo "::error::分支 $BR 同步失败"
+            echo "::error::所有候选版本都同步失败（试过: $CANDIDATES）"
+            if [ "$GL_OK" = "1" ]; then
+              echo "::error::★原因判定：GitLab 可达，所以是【分支/ref 不存在】，不是网络问题★"
+              echo "::error::依据：git-upload-pack 预检返回 200，但 refs/heads/fox_<版本> 拉不到"
+              echo "::error::请对照上面 'ls-remote manifest 分支:' 的注解，挑一个真实存在的版本"
+            else
+              echo "::error::★原因判定：GitLab 不可达★（git-upload-pack 预检非 200）"
+              echo "::error::请改用 manifest_source=twrp_minimal + fox_branch=twrp-14.1"
+            fi
+            for V in $CANDIDATES; do
+              echo "::error::版本 $V 同步失败"
             done
             exit 1
           fi
 
-          if [ "$USED_BRANCH" != "$FOX_BRANCH" ]; then
+          echo "::error::同步成功：使用版本 $USED_BRANCH（官方 ref = fox_$USED_BRANCH）"
+
+          if [ "$USED_BRANCH" != "$(strip_prefix "$FOX_BRANCH")" ]; then
             echo "::warning::════════════════════════════════════════════════════════"
-            echo "::warning::★注意：实际使用分支 $USED_BRANCH，不是请求的 $FOX_BRANCH★"
+            echo "::warning::★注意：实际使用版本 $USED_BRANCH，不是请求的 $FOX_BRANCH★"
             echo "::warning::这是跨版本构建（目标机是 Android 14）。"
             echo "::warning::我们已用「原厂 ramdisk 为底 + 白名单覆盖」策略挡住"
             echo "::warning::绝大部分库版本冲突（init/linker64/libc 保持原厂），"
             echo "::warning::最坏情况是橙狐起不来、Android 仍可进。"
-            echo "::warning::但 recovery 二进制自身仍可能更挑剔，风险高于 fox_14.1。"
+            echo "::warning::但 recovery 二进制自身仍可能更挑剔，风险高于 14.1。"
             echo "::warning::════════════════════════════════════════════════════════"
           else
-            echo "::notice::使用分支 $USED_BRANCH"
+            echo "::notice::使用版本 $USED_BRANCH"
           fi
 
           echo "$ROOT" > "$GITHUB_WORKSPACE/.srcroot"
-          echo "$USED_BRANCH" > "$GITHUB_WORKSPACE/.usedbranch"
-          echo "::notice::源码根 = $ROOT (分支 $USED_BRANCH)"
+          echo "fox_$USED_BRANCH" > "$GITHUB_WORKSPACE/.usedbranch"
+          echo "::notice::源码根 = $ROOT (版本 $USED_BRANCH / ref fox_$USED_BRANCH)"
 
       - name: 同步 TWRP 精简源码（备选，托管在 GitHub，不依赖 GitLab）
         if: env.MANIFEST_SOURCE == 'twrp_minimal'
