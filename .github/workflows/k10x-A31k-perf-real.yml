@@ -2004,42 +2004,6 @@ jobs:
           echo "  ★确认：CONFIG_ARCH_QCOM=y ⇒ kgsl/qcom_scm/ARM_SMMU 等 541 个高通 .o 会正常编译★"
           echo
 
-          # 第 29 轮：SCS/CFI/LTO 是卡二屏的直接原因，最容易在 Restart 时被静默重置。
-          # 原厂 .ko 按 SCS+CFI 编，内核必须一致。这里编译前强制写回并硬断言。
-          echo "===== 第 29 轮：SCS / CFI / LTO 安全插桩（防卡二屏）====="
-          # LTO 是个 choice，必须显式选中 LTO_CLANG 而不是 LTO_NONE
-          ./scripts/config --file out/.config --enable  LTO
-          ./scripts/config --file out/.config --enable  LTO_CLANG
-          ./scripts/config --file out/.config --enable  THINLTO
-          ./scripts/config --file out/.config --disable LTO_NONE
-          ./scripts/config --file out/.config --enable  CFI_CLANG
-          ./scripts/config --file out/.config --enable  CFI_CLANG_SHADOW
-          ./scripts/config --file out/.config --enable  SHADOW_CALL_STACK
-          ./scripts/config --file out/.config --enable  SHADOW_CALL_STACK_VMAP 2>/dev/null || true
-          ./scripts/config --file out/.config --enable  KALLSYMS
-          # 这几项会破坏 SCS/CFI 的前提，必须保持关闭
-          ./scripts/config --file out/.config --disable CFI_PERMISSIVE 2>/dev/null || true
-          ./scripts/config --file out/.config --disable GCOV_KERNEL    2>/dev/null || true
-
-          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
-          SCS_MISSING=""
-          for k in CC_IS_CLANG LTO LTO_CLANG CFI_CLANG SHADOW_CALL_STACK KALLSYMS; do
-            grep -qE "^CONFIG_${k}=y" out/.config || SCS_MISSING="$SCS_MISSING $k"
-          done
-          if grep -qE '^CONFIG_LTO_NONE=y' out/.config; then
-            SCS_MISSING="$SCS_MISSING LTO_NONE(应为n)"
-          fi
-          if [ -n "$SCS_MISSING" ]; then
-            echo "::error title=卡二屏::这些插桩项不是 y：$SCS_MISSING"
-            echo "  ⇒ 原厂 /vendor/lib/modules/*.ko 按 SCS+CFI 编译，内核缺了它们会加载失败 -> 卡二屏。"
-            echo "  --- 查日志里 Restart config 的次数 ---"
-            grep -c 'Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null || true
-            exit 1
-          fi
-          echo "  OK SCS + CFI + LTO 全部就位（这次不会卡二屏）"
-          echo "  ★编译产物里应能看到 arch/arm64/kernel/scs.o 和 kernel/cfi.o★"
-          echo
-
           echo "===== Droidspaces / NoMount 最终生效值（olddefconfig 之后）====="
           grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|NETFILTER_XT_MATCH_ADDRTYPE|USER_NS|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|TMPFS_POSIX_ACL|TMPFS_XATTR|NOMOUNT|CFS_BANDWIDTH|CGROUP_PIDS|FAIR_GROUP_SCHED)=' out/.config || true
           echo
@@ -2504,6 +2468,24 @@ jobs:
           #  ②编译后立刻验 auto.conf / autoconf.h 里的关键项，一旦被改直接失败，
           #     不让一个「静默降级」的内核溜进产物。
           # ============================================================
+          # ★第 32 轮 · SCS/CFI 写回必须在【所有 olddefconfig 之后】★
+          # run#27 实测时序：
+          #   16:37:13  scripts/config --enable SHADOW_CALL_STACK  ⇒ .config 里 =y ✓
+          #   16:37:23  BBR 步骤的 ARCH=arm64 make O=out olddefconfig  ← ★把它冲掉了★
+          #   16:37:39  make O=out syncconfig ⇒ SHADOW_CALL_STACK/LTO_CLANG/CFI_CLANG 全没了
+          # 根因：arch/arm64/Kconfig:69 select ARCH_SUPPORTS_SHADOW_CALL_STACK
+          #         if CC_HAVE_SHADOW_CALL_STACK；而 CC_HAVE_SHADOW_CALL_STACK
+          #         = def_bool $(cc-option, -fsanitize=shadow-call-stack -ffixed-x18)
+          #       olddefconfig 重新求值这条探测，判定不支持就把整条链删了。
+          #       （run#7 能开机 = 它只跑过一次 olddefconfig，且在其之前没动过这些项）
+          # 所以这里——最后一次 olddefconfig 之后、syncconfig 之前——才写回。
+          echo "===== 第 32 轮：SCS / CFI / LTO 写回（在最后一次 olddefconfig 之后）====="
+          for k in LTO LTO_CLANG THINLTO CFI_CLANG CFI_CLANG_SHADOW SHADOW_CALL_STACK KALLSYMS CC_IS_CLANG; do
+            ./scripts/config --file out/.config --enable "$k" 2>/dev/null || true
+          done
+          ./scripts/config --file out/.config --disable LTO_NONE 2>/dev/null || true
+          grep -E '^CONFIG_(CC_IS_CLANG|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
+
           echo "===== 第 30 轮：编译前主动 syncconfig（对齐时间戳，防编译中途 Restart）====="
           for kf in $(find . -name 'Kconfig*' -type f -not -path './out/*' 2>/dev/null); do
             grep -qU $'\r' "$kf" 2>/dev/null && sed -i 's/\r$//' "$kf"
