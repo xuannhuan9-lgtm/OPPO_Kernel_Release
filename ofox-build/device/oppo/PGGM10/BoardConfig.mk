@@ -315,7 +315,6 @@ TW_INCLUDE_CRYPTO := true
 TW_INCLUDE_CRYPTO_FBE := true
 BOARD_USES_QCOM_FBE_DECRYPTION := true
 BOARD_USES_METADATA_PARTITION := true
-TW_INCLUDE_FBE_METADATA_DECRYPT := true
 # 元数据加密：/metadata = ext4（probe 实测），告诉 recovery 去这里找 key
 TW_INCLUDE_FBE_METADATA_DECRYPT := true
 
