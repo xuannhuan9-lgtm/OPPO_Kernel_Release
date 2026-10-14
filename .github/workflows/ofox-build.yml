@@ -30,15 +30,18 @@ on:
   workflow_dispatch:
     inputs:
       fox_branch:
-        description: '橙狐源码分支。★优先 fox_14.1★（目标机是 Android 14，原厂 ramdisk 同代，libc/linker/HAL 版本才对得上）。若 gitlab 上 fox_14.1 同步失败，会自动回退 fox_12.1 并在日志里显著告警 —— 跨版本混用有风险，详见 README「风险」一节。twrp-14.1 是 minimal-manifest-twrp 的 14 分支（已确认存在），功能少但不依赖 gitlab'
+        description: '橙狐/源码分支。默认值 fox_14.1 表示「按序自动尝试」：fox_14.1 → fox_13.1 → fox_12.1 → fox_11.0（目标机是 Android 14，优先同代以避免库版本冲突）。若你显式选其它值，则只尝试那一个分支。twrp_* 分支用于 manifest_source=twrp_minimal（GitHub 上，不依赖 GitLab）'
         type: choice
         options:
           - fox_14.1
-          - twrp-14.1
+          - fox_13.1
           - fox_12.1
+          - fox_11.0
+          - twrp-14.1
+          - twrp-12.1
         default: fox_14.1
       manifest_source:
-        description: '源码清单来源。orangefox = gitlab.com/OrangeFox/manifest（★优先★，橙狐完整源，含 OF_* 支持）；twrp_minimal = github.com/minimal-manifest-twrp（备选，同步快但功能少）'
+        description: '源码清单来源。orangefox = gitlab.com/OrangeFox/manifest（橙狐完整源，含 OF_* 支持，但依赖 GitLab 可达）；twrp_minimal = github.com/minimal-manifest-twrp（★GitLab 不通时用这个★，托管在 GitHub、不依赖 GitLab；功能比橙狐少但没有 OF_* 专属特性）'
         type: choice
         options:
           - orangefox
@@ -156,48 +159,147 @@ jobs:
           echo "$HOME/bin" >> "$GITHUB_PATH"
           "$HOME/bin/repo" --version
 
-      - name: 同步橙狐源码（OrangeFox 完整 manifest，优先）
+      - name: 同步橙狐源码（GitLab，官方 sync 脚本优先）
         if: env.MANIFEST_SOURCE == 'orangefox'
         run: |
           set -o pipefail
-          mkdir -p fox_src
-          cd fox_src
+          SRC_ROOT="$GITHUB_WORKSPACE/fox_src/OrangeFox"
+          mkdir -p "$SRC_ROOT"
+          cd "$GITHUB_WORKSPACE/fox_src"
 
-          # ---- 尝试分支列表：指定的分支 → 失败则回退 fox_12.1 ----
-          TRY_BRANCHES="$FOX_BRANCH"
-          if [ "$FOX_BRANCH" != "fox_12.1" ]; then
-            TRY_BRANCHES="$FOX_BRANCH fox_12.1"
-            echo "::notice::若 $FOX_BRANCH 不可用，将自动回退 fox_12.1"
+          # ================================================================
+          # 候选分支：默认按序尝试；用户显式指定非默认值时只试它
+          # ================================================================
+          DEFAULT_BRANCHES="fox_14.1 fox_13.1 fox_12.1 fox_11.0"
+          if [ "$FOX_BRANCH" = "fox_14.1" ]; then
+            CANDIDATES="$DEFAULT_BRANCHES"
+            echo "::notice::使用默认候选序列：$CANDIDATES"
+          else
+            CANDIDATES="$FOX_BRANCH"
+            echo "::notice::用户显式指定分支，只尝试：$CANDIDATES"
           fi
 
+          # ================================================================
+          # 1) 网络 / 分支 预检（全部打印，便于诊断）
+          # ================================================================
+          echo "::group::GitLab 连通性与分支预检"
+          GL_OK=1
+          probe() {
+            # $1=URL $2=描述
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -L "$1" 2>/dev/null || echo "000")
+            echo "  [$code] $2"
+            echo "        $1"
+            [ "$code" = "200" ] && return 0 || return 1
+          }
+
+          echo "--- GitLab 可达性 ---"
+          probe "https://gitlab.com/OrangeFox/manifest.git/info/refs?service=git-upload-pack" \
+                "manifest 仓库 git-upload-pack" || GL_OK=0
+          probe "https://gitlab.com/OrangeFox/sync.git/info/refs?service=git-upload-pack" \
+                "sync 仓库 git-upload-pack" || GL_OK=0
+
+          echo "--- 候选分支 default.xml ---"
+          for BR in $CANDIDATES; do
+            probe "https://gitlab.com/OrangeFox/manifest/-/raw/${BR}/default.xml" \
+                  "manifest 分支 ${BR}" || true
+          done
+          echo "::endgroup::"
+
+          if [ "$GL_OK" != "1" ]; then
+            echo "::error::GitLab 不可达（manifest/sync 仓库的 git-upload-pack 预检失败）。"
+            echo "::error::这通常是 runner 出网策略或 GitLab 侧限流导致，与分支名无关。"
+            echo "::error::建议改用：manifest_source=twrp_minimal + fox_branch=twrp-14.1"
+            echo "::error::（minimal-manifest-twrp 在 GitHub 上，已确认 twrp-14.1 分支存在）"
+          fi
+
+          # ================================================================
+          # 2) 逐个候选分支尝试（官方 sync 脚本优先，repo init 回退）
+          # ================================================================
           ROOT=""
           USED_BRANCH=""
-          for BR in $TRY_BRANCHES; do
-            echo "::group::尝试分支 $BR"
-            rm -rf OrangeFox fox_sync
-            mkdir -p OrangeFox
-            cd OrangeFox
+          SYNC_SCRIPT=""
 
-            if "$HOME/bin/repo" init -u https://gitlab.com/OrangeFox/manifest.git -b "$BR" --depth=1 2>&1 | tail -20; then
-              echo "::notice::repo init 成功（$BR），开始 sync"
-              if "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags 2>&1 | tail -40; then
-                if [ -f build/envsetup.sh ]; then
-                  ROOT="$PWD"
-                  USED_BRANCH="$BR"
-                  cd ..
-                  echo "::endgroup::"
-                  break
+          for BR in $CANDIDATES; do
+            echo ""
+            echo "::group::尝试分支 $BR"
+            rm -rf "$SRC_ROOT"
+            mkdir -p "$SRC_ROOT"
+
+            # ---- 方式 A：官方 sync 脚本（首选）----
+            OK=0
+            rm -rf /tmp/ofox-sync
+            if git clone --depth=1 https://gitlab.com/OrangeFox/sync.git /tmp/ofox-sync 2>&1 | tail -5; then
+              echo "  sync 仓库克隆成功，内容："
+              ls -la /tmp/ofox-sync | head -20
+
+              SYNC_SCRIPT=""
+              for cand in /tmp/ofox-sync/orangefox_sync.sh /tmp/ofox-sync/sync.sh; do
+                [ -f "$cand" ] && SYNC_SCRIPT="$cand" && break
+              done
+
+              if [ -n "$SYNC_SCRIPT" ]; then
+                echo "  使用官方脚本: $SYNC_SCRIPT"
+                chmod +x "$SYNC_SCRIPT"
+                echo "  执行: $SYNC_SCRIPT --branch $BR --path $SRC_ROOT"
+                if "$SYNC_SCRIPT" --branch "$BR" --path "$SRC_ROOT" > /tmp/sync-$BR.log 2>&1; then
+                  tail -20 /tmp/sync-$BR.log
+                  [ -f "$SRC_ROOT/build/envsetup.sh" ] && OK=1
+                else
+                  echo "  !! 官方脚本失败，报错尾部 20 行："
+                  tail -20 /tmp/sync-$BR.log
                 fi
+              else
+                echo "  !! sync 仓库里没有 orangefox_sync.sh / sync.sh"
+                ls -la /tmp/ofox-sync
               fi
+            else
+              echo "  !! sync 仓库克隆失败"
             fi
+
+            # ---- 方式 B：repo init + repo sync（回退）----
+            if [ "$OK" != "1" ]; then
+              echo "  ---- 回退到 repo init -u manifest.git -b $BR ----"
+              cd "$SRC_ROOT"
+              if "$HOME/bin/repo" init -u https://gitlab.com/OrangeFox/manifest.git \
+                     -b "$BR" --depth=1 --no-repo-verify -q 2>&1 | tail -10; then
+                if "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags \
+                       > /tmp/reposync-$BR.log 2>&1; then
+                  tail -20 /tmp/reposync-$BR.log
+                  [ -f build/envsetup.sh ] && OK=1
+                else
+                  echo "  !! repo sync 失败，报错尾部 20 行："
+                  tail -20 /tmp/reposync-$BR.log
+                fi
+              else
+                echo "  !! repo init 失败（该分支可能不存在）"
+              fi
+              cd "$GITHUB_WORKSPACE/fox_src"
+            fi
+
+            if [ "$OK" = "1" ]; then
+              ROOT="$SRC_ROOT"
+              USED_BRANCH="$BR"
+              echo "::notice::✓ 分支 $BR 同步成功"
+              echo "::endgroup::"
+              break
+            fi
+
             echo "::warning::分支 $BR 同步失败"
-            cd ..
             echo "::endgroup::"
           done
 
+          # ================================================================
+          # 3) 结果处理
+          # ================================================================
           if [ -z "$ROOT" ]; then
-            echo "::error::所有候选分支都同步失败（试过: $TRY_BRANCHES）。"
-            echo "::error::本沙箱/CI 若连不上 gitlab.com，请改用 manifest_source=twrp_minimal。"
+            echo "::error::所有候选分支都同步失败（试过: $CANDIDATES）。"
+            echo "::error::可能原因："
+            echo "::error::  1) GitLab 不可达（看上面预检的 http_code）"
+            echo "::error::  2) 这些分支都不存在"
+            echo "::error::  3) manifest 引用的子项目拉取失败（repo sync 报错见上）"
+            echo "::error::解决办法：改用 manifest_source=twrp_minimal + fox_branch=twrp-14.1"
+            echo "::error::（minimal-manifest-twrp 托管在 GitHub，不依赖 GitLab）"
             exit 1
           fi
 
@@ -205,8 +307,9 @@ jobs:
             echo "::warning::════════════════════════════════════════════════════════"
             echo "::warning::★注意：实际使用分支 $USED_BRANCH，不是请求的 $FOX_BRANCH★"
             echo "::warning::这是跨版本构建（目标机是 Android 14）。"
-            echo "::warning::我们已经用「原厂 ramdisk 为底 + 白名单覆盖」策略"
-            echo "::warning::挡住了绝大部分库版本冲突（init/linker64/libc 保持原厂），"
+            echo "::warning::我们已用「原厂 ramdisk 为底 + 白名单覆盖」策略挡住"
+            echo "::warning::绝大部分库版本冲突（init/linker64/libc 保持原厂），"
+            echo "::warning::最坏情况是橙狐起不来、Android 仍可进。"
             echo "::warning::但 recovery 二进制自身仍可能更挑剔，风险高于 fox_14.1。"
             echo "::warning::════════════════════════════════════════════════════════"
           else
@@ -217,16 +320,50 @@ jobs:
           echo "$USED_BRANCH" > "$GITHUB_WORKSPACE/.usedbranch"
           echo "::notice::源码根 = $ROOT (分支 $USED_BRANCH)"
 
-      - name: 同步 TWRP 精简源码（备选）
+      - name: 同步 TWRP 精简源码（备选，托管在 GitHub，不依赖 GitLab）
         if: env.MANIFEST_SOURCE == 'twrp_minimal'
         run: |
           set -o pipefail
-          rm -rf fox_src
-          mkdir -p fox_src/OrangeFox
-          cd fox_src/OrangeFox
-          echo "::notice::使用 minimal-manifest-twrp twrp-12.1（精简源，没有橙狐专属功能）"
-          "$HOME/bin/repo" init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1 --depth=1
+          SRC_ROOT="$GITHUB_WORKSPACE/fox_src/OrangeFox"
+          rm -rf "$GITHUB_WORKSPACE/fox_src"
+          mkdir -p "$SRC_ROOT"
+          cd "$SRC_ROOT"
+
+          # ★尊重用户的 fox_branch 输入★
+          # 这条路由 minimal-manifest-twrp 提供，分支名是 twrp-<版本>。
+          # 若用户填的是 fox_14.1 这类橙狐分支名，映射成对应的 twrp-<版本>。
+          case "$FOX_BRANCH" in
+            twrp-*) TWRP_BRANCH="$FOX_BRANCH" ;;
+            fox_14.1|fox_14*) TWRP_BRANCH="twrp-14.1" ;;
+            fox_13*) TWRP_BRANCH="twrp-13.0" ;;
+            fox_12.1|fox_12*) TWRP_BRANCH="twrp-12.1" ;;
+            fox_11*) TWRP_BRANCH="twrp-11.0" ;;
+            *) TWRP_BRANCH="twrp-12.1" ;;
+          esac
+          echo "::notice::minimal-manifest-twrp：请求分支 $FOX_BRANCH → 实际使用 $TWRP_BRANCH"
+
+          # 预检（便于诊断）
+          echo "::group::GitHub 分支预检"
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -L \
+                 "https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp/tree/$TWRP_BRANCH" 2>/dev/null || echo "000")
+          echo "  [$CODE] https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp/tree/$TWRP_BRANCH"
+          echo "::endgroup::"
+
+          echo "::group::repo init + sync"
+          "$HOME/bin/repo" init \
+            -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
+            -b "$TWRP_BRANCH" --depth=1 --no-repo-verify -q
           "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags 2>&1 | tail -60
+          echo "::endgroup::"
+
+          if [ ! -f "$SRC_ROOT/build/envsetup.sh" ]; then
+            echo "::error::同步后没有 build/envsetup.sh，源码树不完整（分支 $TWRP_BRANCH）。"
+            exit 1
+          fi
+
+          echo "$SRC_ROOT" > "$GITHUB_WORKSPACE/.srcroot"
+          echo "$TWRP_BRANCH" > "$GITHUB_WORKSPACE/.usedbranch"
+          echo "::notice::源码根 = $SRC_ROOT (分支 $TWRP_BRANCH)"
 
       - name: 定位源码根目录
         id: srcroot
