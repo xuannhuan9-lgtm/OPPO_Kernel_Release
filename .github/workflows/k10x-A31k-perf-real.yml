@@ -1927,63 +1927,78 @@ jobs:
               echo "===== 改之前 ====="
               grep -E '^CONFIG_(TCP_CONG_ADVANCED|TCP_CONG_BBR|DEFAULT_TCP_CONG|NET_SCH_FQ|NET_SCH_FQ_CODEL)=' out/.config || true
 
-              # ★必须同时关掉 DEFAULT_CUBIC★
-              #   net/ipv4/Kconfig:
-              #     config DEFAULT_TCP_CONG
-              #       string
-              #       default "bic"   if DEFAULT_BIC
-              #       default "cubic" if DEFAULT_CUBIC   ←★★ 这行会赢 ★★
-              #       ...
-              #   它是 string 不是 choice，Kconfig 的 default 链按顺序求值，
-              #   DEFAULT_CUBIC=y 时 "cubic" 会被重新选上，把我们设的 bbr 覆盖掉。
-              #   这就是设备上 /proc/config.gz 一直是 cubic 的真正原因。
-              ./scripts/config --file out/.config --disable DEFAULT_CUBIC
+              # ============================================================
+              # ★第 16 轮：真正的修法★
+              # ------------------------------------------------------------
+              # net/ipv4/Kconfig v5.4 的真实结构（choice，不是 string！）：
+              #
+              #   choice
+              #       prompt "Default TCP congestion control"
+              #       default DEFAULT_CUBIC          ← 默认选 Cubic
+              #       config DEFAULT_BBR
+              #           bool "BBR" if TCP_CONG_BBR=y    ← ★要选这个★
+              #       config DEFAULT_CUBIC
+              #           bool "Cubic" if TCP_CONG_CUBIC=y
+              #   endchoice
+              #
+              #   ⇒ CONFIG_DEFAULT_TCP_CONG 是 choice 推导出的字符串，
+              #     .config 里【没有】这个符号可设！--set-str 是无效的。
+              #     必须开 choice 成员：--enable DEFAULT_BBR + --disable DEFAULT_CUBIC
+              #
+              # run #8 实测证明：只 --set-str + --disable DEFAULT_CUBIC，
+              #   olddefconfig 依然把 choice 选回 DEFAULT_CUBIC（有日志：
+              #   "CONFIG_DEFAULT_TCP_CONG: bbr -> cubic"）。
+              # ============================================================
               ./scripts/config --file out/.config --enable TCP_CONG_ADVANCED
               ./scripts/config --file out/.config --enable TCP_CONG_BBR
+              ./scripts/config --file out/.config --enable TCP_CONG_CUBIC
               ./scripts/config --file out/.config --enable NET_SCH_FQ
               ./scripts/config --file out/.config --enable NET_SCH_FQ_CODEL
-              ./scripts/config --file out/.config --set-str DEFAULT_TCP_CONG bbr
-              ./scripts/config --file out/.config --set-str DEFAULT_NET_SCH fq
-              # 同理：默认 qdisc 也是 default 链，关掉 pfifo_fast 的首选项
+
+              # ★核心：开 DEFAULT_BBR，关 DEFAULT_CUBIC（choice 里二选一）★
+              ./scripts/config --file out/.config --enable  DEFAULT_BBR
+              ./scripts/config --file out/.config --disable DEFAULT_CUBIC
+
+              # 默认 qdisc：也是 choice，成员叫 DEFAULT_FQ
+              ./scripts/config --file out/.config --enable  DEFAULT_FQ 2>/dev/null || true
               ./scripts/config --file out/.config --disable DEFAULT_PFIFO_FAST 2>/dev/null || true
 
-              # ★关键：重跑 olddefconfig 让 Kconfig 真正接受这些改动★
-              echo "===== 重跑 olddefconfig（让 Kconfig 接受 DEFAULT_TCP_CONG=bbr）====="
+              # ★重跑 olddefconfig 让 Kconfig 解析 choice★
+              echo "===== 重跑 olddefconfig（让 Kconfig 接受 DEFAULT_BBR）====="
               make -j"$(nproc)" O=out olddefconfig >/dev/null 2>&1 \
                 || { echo "::error title=性能修正::olddefconfig 失败"; exit 1; }
 
               echo "===== 改之后（olddefconfig 已重跑）====="
-              grep -E '^CONFIG_(TCP_CONG_ADVANCED|TCP_CONG_BBR|DEFAULT_TCP_CONG|NET_SCH_FQ|NET_SCH_FQ_CODEL|DEFAULT_NET_SCH)=' out/.config || true
+              grep -E '^CONFIG_(TCP_CONG_ADVANCED|TCP_CONG_BBR|DEFAULT_BBR|DEFAULT_CUBIC|DEFAULT_TCP_CONG|NET_SCH_FQ|DEFAULT_FQ|DEFAULT_NET_SCH)=' out/.config || true
 
-              # ★硬断言：olddefconfig 之后必须还是 bbr，否则直接失败★
-              #   注意 CONFIG_DEFAULT_TCP_CONG 的值带引号
+              # ★硬断言★
               if ! grep -qE '^CONFIG_TCP_CONG_ADVANCED=y' out/.config; then
-                echo "::error title=性能修正::TCP_CONG_ADVANCED 没打开 —— BBR 不可能生效"
-                grep -n 'TCP_CONG_ADVANCED' out/.config || true
-                exit 1
+                echo "::error title=性能修正::TCP_CONG_ADVANCED 没打开"; exit 1
               fi
               if ! grep -qE '^CONFIG_TCP_CONG_BBR=y' out/.config; then
-                echo "::error title=性能修正::TCP_CONG_BBR 没编进去"
+                echo "::error title=性能修正::TCP_CONG_BBR 没编进去"; exit 1
+              fi
+              if ! grep -qE '^CONFIG_DEFAULT_BBR=y' out/.config; then
+                echo "::error title=性能修正::DEFAULT_BBR 没选上（choice 成员没开）"
+                grep -n -A14 '^choice' net/ipv4/Kconfig | head -30 || true
                 exit 1
               fi
               if grep -qE '^CONFIG_DEFAULT_CUBIC=y' out/.config; then
-                echo "::error title=性能修正::DEFAULT_CUBIC 还是 y —— 它会在 Kconfig default 链里赢过 bbr"
+                echo "::error title=性能修正::DEFAULT_CUBIC 还是 y —— choice 里 Cubic 和 BBR 同时选中了"
                 exit 1
               fi
               if ! grep -qE '^CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config; then
-                echo "::error title=性能修正::DEFAULT_TCP_CONG 不是 bbr（olddefconfig 又把它吃了）"
+                echo "::error title=性能修正::DEFAULT_TCP_CONG 不是 bbr（choice 没生效）"
                 echo "  当前值: $(grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config)"
-                echo "  排查：TCP_CONG_ADVANCED=$(./scripts/config --file out/.config --state TCP_CONG_ADVANCED)"
-                echo "        TCP_CONG_BBR=$(./scripts/config --file out/.config --state TCP_CONG_BBR)"
-                grep -n -A3 'config DEFAULT_TCP_CONG' net/ipv4/Kconfig | head -12 || true
+                echo "  DEFAULT_BBR   = $(./scripts/config --file out/.config --state DEFAULT_BBR)"
+                echo "  DEFAULT_CUBIC = $(./scripts/config --file out/.config --state DEFAULT_CUBIC)"
                 exit 1
               fi
-              if ! grep -qE '^CONFIG_NET_SCH_FQ=y' out/.config; then
-                echo "::warning title=性能修正::NET_SCH_FQ 不是 y（fq 队列不可用，但 BBR 仍生效）"
-              fi
-              echo "  ✓ BBR 三重断言通过："
+              echo "  ✓ BBR 四重断言全部通过："
               echo "     TCP_CONG_ADVANCED = $(./scripts/config --file out/.config --state TCP_CONG_ADVANCED)"
               echo "     TCP_CONG_BBR      = $(./scripts/config --file out/.config --state TCP_CONG_BBR)"
+              echo "     DEFAULT_BBR       = $(./scripts/config --file out/.config --state DEFAULT_BBR)"
+              echo "     DEFAULT_CUBIC     = $(./scripts/config --file out/.config --state DEFAULT_CUBIC)"
               echo "     DEFAULT_TCP_CONG  = $(grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config | cut -d= -f2)"
               echo "     NET_SCH_FQ        = $(./scripts/config --file out/.config --state NET_SCH_FQ)"
               case "${{ inputs.perf }}" in
