@@ -9,9 +9,25 @@
 #
 
 # 继承基础产品
+# ★对齐官方 TWRP 设备树（TeamWin/android_device_xiaomi_mojito）的写法★
+#   官方用的是 core_64_bit.mk + full_base_telephony.mk，实测能配 TWRP 14.1。
+#   原来这里用了 aosp_base.mk + emulated_storage.mk —— 精简 manifest 里
+#   不一定有 emulated_storage.mk，inherit 不存在的文件会让【整个产品解析失败】，
+#   表现就是 lunch 列表里没有任何 fox_PGGM10-*。所以逐个做存在性检查。
+# NOTE: no $(info)/$(warning) anywhere in this file. AOSP 14 walks product
+# makefiles through PRODUCT_RELEASE_CONFIG_MAPS and a parse-time print breaks
+# product registration ("Failed to parse make line"), which makes lunch show
+# no fox_PGGM10-* combo at all.
+ifeq ($(wildcard $(SRC_TARGET_DIR)/product/core_64_bit.mk),)
+  $(error core_64_bit.mk missing from source tree)
+endif
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
-$(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
-$(call inherit-product, $(SRC_TARGET_DIR)/product/emulated_storage.mk)
+
+ifneq ($(wildcard $(SRC_TARGET_DIR)/product/full_base_telephony.mk),)
+  $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+else ifneq ($(wildcard $(SRC_TARGET_DIR)/product/aosp_base.mk),)
+  $(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
+endif
 
 # 继承本设备
 $(call inherit-product, device/oppo/PGGM10/device.mk)
@@ -20,7 +36,7 @@ $(call inherit-product, device/oppo/PGGM10/device.mk)
 # 继承 recovery 公共配置
 #
 # 四种源码树，路径不一样，必须按存在性判断，否则 inherit-product 会
-# 指向不存在的文件、直接 $(error) 让 lunch 挂掉：
+# 指向不存在的文件、直接 $(error core_64_bit.mk missing from source tree) 让 lunch 挂掉：
 #
 #   A) 橙狐完整 manifest (gitlab) → vendor/fox/config/common.mk 存在
 #   B) minimal-manifest-twrp     → 只有 vendor/twrp/config/common.mk
@@ -42,7 +58,6 @@ ifeq ($(wildcard vendor/fox/config/common.mk),)
   ifeq ($(wildcard vendor/twrp/config/common.mk),)
     ifeq ($(wildcard vendor/pb/config/common.mk),)
       # ---- D) 内置最小兜底 ----
-      $(info [fox_PGGM10] vendor/{fox,twrp,pb} 的 common.mk 都不存在，启用内置最小配置)
 
       PRODUCT_PACKAGES += \
           recovery \
@@ -55,17 +70,14 @@ ifeq ($(wildcard vendor/fox/config/common.mk),)
           ro.recovery.version=builtin-fallback
     else
       # ---- C) PitchBlack Recovery ----
-      $(info [fox_PGGM10] 使用 vendor/pb/config/common.mk (PitchBlack))
       $(call inherit-product, vendor/pb/config/common.mk)
     endif
   else
     # ---- B) minimal-manifest-twrp ----
-    $(info [fox_PGGM10] 使用 vendor/twrp/config/common.mk)
     $(call inherit-product, vendor/twrp/config/common.mk)
   endif
 else
   # ---- A) 橙狐完整源 ----
-  $(info [fox_PGGM10] 使用 vendor/fox/config/common.mk)
   $(call inherit-product, vendor/fox/config/common.mk)
 endif
 
