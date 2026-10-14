@@ -25,12 +25,12 @@ ENABLE_VIRTUAL_AB := true
 ifneq ($(wildcard $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk),)
   $(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk)
 else
-  $(warning [PGGM10] 没有 virtual_ab_ota.mk，跳过)
+#$(warning [PGGM10] 没有 virtual_ab_ota.mk，跳过)
 endif
 ifneq ($(wildcard $(SRC_TARGET_DIR)/product/updatable_apex.mk),)
   $(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
 else
-  $(warning [PGGM10] 没有 updatable_apex.mk，跳过)
+#$(warning [PGGM10] 没有 updatable_apex.mk，跳过)
 endif
 
 PRODUCT_SHIPPING_API_LEVEL := 34
@@ -89,7 +89,7 @@ RECOVERY_LIBRARY_SOURCE_FILES += \
     $(TARGET_OUT_SYSTEM_EXT_SHARED_LIBRARIES)/vendor.display.config@2.0.so \
     $(TARGET_OUT_SYSTEM_EXT_SHARED_LIBRARIES)/libdisplayconfig.qti.so
 else
-$(warning [PGGM10] 没找到 vendor/qcom/opensource/display，跳过 QTI 显示库（recovery 用默认 gralloc 渲染）)
+#$(warning [PGGM10] 没找到 vendor/qcom/opensource/display，跳过 QTI 显示库（recovery 用默认 gralloc 渲染）)
 endif
 
 RECOVERY_LIBRARY_SOURCE_FILES += \
