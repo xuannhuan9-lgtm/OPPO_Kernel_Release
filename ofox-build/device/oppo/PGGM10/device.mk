@@ -4,7 +4,11 @@
 # 只放「产品级别的包与服务」，开关类环境变量在 vendorsetup.sh。
 #
 
-LOCAL_PATH := device/oppo/PGGM10
+# ★不要在这里设 LOCAL_PATH★
+#   LOCAL_PATH 是全局变量，产品 .mk 里写死它会污染后续解析，
+#   而且官方 TWRP 设备树从不这么写。用 $(call my-dir) 也多余——
+#   product makefile 不需要 LOCAL_PATH。
+#   （原来这里写的是  LOCAL_PATH := device/oppo/PGGM10 ，已删除）
 
 # ---------------------------------------------------------------------------
 # A/B + 动态分区
@@ -13,8 +17,21 @@ LOCAL_PATH := device/oppo/PGGM10
 PRODUCT_USE_DYNAMIC_PARTITIONS := true
 AB_OTA_UPDATER := true
 ENABLE_VIRTUAL_AB := true
-$(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk)
-$(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
+
+# ★可选 inherit 必须做存在性检查★
+#   inherit-product 指向不存在的文件 ⇒ AOSP 直接 $(error) ⇒
+#   整个产品解析失败 ⇒ lunch 列表里【一个 fox_PGGM10-* 都不会出现】。
+#   这正是 run #7 的症状，所以下面一律先 wildcard 再 inherit。
+ifneq ($(wildcard $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk),)
+  $(call inherit-product, $(SRC_TARGET_DIR)/product/virtual_ab_ota.mk)
+else
+#$(warning [PGGM10] 没有 virtual_ab_ota.mk，跳过)
+endif
+ifneq ($(wildcard $(SRC_TARGET_DIR)/product/updatable_apex.mk),)
+  $(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
+else
+#$(warning [PGGM10] 没有 updatable_apex.mk，跳过)
+endif
 
 PRODUCT_SHIPPING_API_LEVEL := 34
 
@@ -72,7 +89,7 @@ RECOVERY_LIBRARY_SOURCE_FILES += \
     $(TARGET_OUT_SYSTEM_EXT_SHARED_LIBRARIES)/vendor.display.config@2.0.so \
     $(TARGET_OUT_SYSTEM_EXT_SHARED_LIBRARIES)/libdisplayconfig.qti.so
 else
-$(warning [PGGM10] 没找到 vendor/qcom/opensource/display，跳过 QTI 显示库（recovery 用默认 gralloc 渲染）)
+#$(warning [PGGM10] 没找到 vendor/qcom/opensource/display，跳过 QTI 显示库（recovery 用默认 gralloc 渲染）)
 endif
 
 RECOVERY_LIBRARY_SOURCE_FILES += \
