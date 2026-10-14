@@ -856,34 +856,44 @@ jobs:
           # 3) make
           # ================================================================
           echo "::group::make recoveryimage -j$MAKE_JOBS"
-          # ★run #15 的教训★ make 被 SIGTERM(143) 干掉，但日志里查不到原因。
-          #   下次必须留下证据：后台跑 make，同时采样内存/负载写到独立文件，
-          #   这样即使 make 被杀，"死前那一刻的内存"也能看到。
+          # ★run #15/#16 的教训★ make 启动 soong_ui 后 3~6 分钟被 SIGTERM(143)，
+          #   且 143 之后 runner 直接 shutdown ⇒ if: always() 的上传步骤也不执行。
+          #   所以：① 采样内存+磁盘；② make 输出【同时】打到 job log（tee），
+          #   这样即使 artifact 传不上来，job log 里也有。
           set +e
-          : > /tmp/memwatch.log
+          : > /tmp/reswatch.log
           (
-            for n in $(seq 1 240); do
-              sleep 15
-              echo "[$(date +%H:%M:%S)] $(free -m | awk '/Mem:/{printf \"mem used=%sMB avail=%sMB\", $3, $7}') $(free -m | awk '/Swap:/{printf \"swap used=%sMB\", $3}') load=$(cut -d\  -f1 /proc/loadavg)" >> /tmp/memwatch.log
+            n=0
+            while [ $n -lt 300 ]; do
+              n=$((n+1))
+              sleep 10
+              MEM=$(free -m | awk '/^Mem:/{print $7}')
+              SWP=$(free -m | awk '/^Swap:/{print $3}')
+              DSK=$(df -m / | awk 'NR==2{print $4}')
+              LOD=$(cut -d' ' -f1 /proc/loadavg)
+              printf '[%s] mem_avail=%sMB swap_used=%sMB disk_avail=%sMB load=%s\n' \
+                     "$(date +%H:%M:%S)" "$MEM" "$SWP" "$DSK" "$LOD" >> /tmp/reswatch.log
             done
           ) &
-          MEMWATCH_PID=$!
+          WATCH_PID=$!
 
-          make -j"$MAKE_JOBS" recoveryimage > "$LOG" 2>&1
-          RC=$?
-          kill "$MEMWATCH_PID" 2>/dev/null || true
+          # make 输出同时进 build.log 和 job log（tee），并用行缓冲
+          make -j"$MAKE_JOBS" recoveryimage 2>&1 | tee "$LOG"
+          RC=${PIPESTATUS[0]}
+          kill "$WATCH_PID" 2>/dev/null || true
+          sleep 1
           set -e
 
-          echo "===== 内存采样（make 期间，每 15 秒）====="
-          tail -40 /tmp/memwatch.log || true
-          echo "===== make 退出码 $RC ====="
+          echo "===== 资源采样（make 期间，每 10 秒）====="
+          tail -50 /tmp/reswatch.log 2>/dev/null || echo "(无采样)"
+          echo "===== make 退出码 = $RC ====="
           if [ "$RC" = "143" ]; then
-            echo "::error::★make 被 SIGTERM(143) 终止 —— 上一轮就是这样★"
-            echo "::error::看上面的内存采样：如果 mem avail 接近 0 或 swap 用满 ⇒ 就是 OOM"
-            echo "::error::对策：make_jobs 再降到 1，或确认 swap 步骤真的生效了"
+            echo "::error::★make 被 SIGTERM(143) 终止★"
+            echo "::error::看上面采样：mem_avail 接近 0 ⇒ OOM；disk_avail 接近 0 ⇒ 磁盘满"
+            echo "::error::注意 143 之后 runner 会 shutdown，artifact 传不上来 ⇒ 日志只能靠 job log"
           fi
-          echo "===== build.log 尾部 40 行 ====="
-          tail -40 "$LOG"
+          echo "===== build.log 尾部 60 行 ====="
+          tail -60 "$LOG"
           echo "::endgroup::"
 
           if [ "$RC" -ne 0 ]; then
