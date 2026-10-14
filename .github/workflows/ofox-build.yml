@@ -81,9 +81,9 @@ on:
         required: false
         default: ''
       make_jobs:
-        description: '并行编译线程数。GitHub 免费 runner 是 4 核，填 4 最合适；填太大反而会 OOM 被 kill'
+        description: '并行编译线程数。★run #15 教训：7GB 内存编 AOSP14，填 4 会被 OOM kill；默认降到 2（已加 8GB swap）。想快点可以试 3'
         type: string
-        default: '4'
+        default: '2'
 
 permissions:
   contents: read
@@ -142,6 +142,35 @@ jobs:
                       /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           sudo apt-get clean
           echo "清理后: $(df -h / | tail -1 | awk '{print $4}') 可用"
+
+      # ======================================================================
+      # ★加 SWAP（run #15 的教训）★
+      #
+      # run #15 首次 lunch 成功、soong_ui 启动，但 3.9 分钟后被 SIGTERM
+      # （exit code 143），日志只有 "Terminate orphan process: soong_ui"。
+      # GitHub 免费 runner 只有 7GB 内存，AOSP 14 的 soong 在分析 Android.bp
+      # 阶段（5 万+ bp 文件）峰值内存超过 7GB ⇒ 被 OOM killer 干掉。
+      #
+      # 标准解法：加 8GB swap。这是 AOSP 在 GitHub runner 上的通行做法。
+      # ======================================================================
+      - name: 加 SWAP 与内存护栏（防 soong OOM 被 kill）
+        run: |
+          echo "=== 加之前 ==="
+          free -h
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 8G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=8192
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          echo "=== 加之后（应该有 8GB Swap）==="
+          free -h
+          swapon --show
+          # 降低 OOM 概率：让内核更愿意回收 page cache 而不是杀进程
+          sudo sysctl -w vm.swappiness=60 || true
+          sudo sysctl -w vm.overcommit_memory=1 || true
+          echo "=== 磁盘（swap 占 8G）==="
+          df -h / /mnt | tail -3
 
       - name: 安装依赖
         run: |
@@ -827,10 +856,33 @@ jobs:
           # 3) make
           # ================================================================
           echo "::group::make recoveryimage -j$MAKE_JOBS"
+          # ★run #15 的教训★ make 被 SIGTERM(143) 干掉，但日志里查不到原因。
+          #   下次必须留下证据：后台跑 make，同时采样内存/负载写到独立文件，
+          #   这样即使 make 被杀，"死前那一刻的内存"也能看到。
           set +e
+          : > /tmp/memwatch.log
+          (
+            for n in $(seq 1 240); do
+              sleep 15
+              echo "[$(date +%H:%M:%S)] $(free -m | awk '/Mem:/{printf \"mem used=%sMB avail=%sMB\", $3, $7}') $(free -m | awk '/Swap:/{printf \"swap used=%sMB\", $3}') load=$(cut -d\  -f1 /proc/loadavg)" >> /tmp/memwatch.log
+            done
+          ) &
+          MEMWATCH_PID=$!
+
           make -j"$MAKE_JOBS" recoveryimage > "$LOG" 2>&1
           RC=$?
+          kill "$MEMWATCH_PID" 2>/dev/null || true
           set -e
+
+          echo "===== 内存采样（make 期间，每 15 秒）====="
+          tail -40 /tmp/memwatch.log || true
+          echo "===== make 退出码 $RC ====="
+          if [ "$RC" = "143" ]; then
+            echo "::error::★make 被 SIGTERM(143) 终止 —— 上一轮就是这样★"
+            echo "::error::看上面的内存采样：如果 mem avail 接近 0 或 swap 用满 ⇒ 就是 OOM"
+            echo "::error::对策：make_jobs 再降到 1，或确认 swap 步骤真的生效了"
+          fi
+          echo "===== build.log 尾部 40 行 ====="
           tail -40 "$LOG"
           echo "::endgroup::"
 
