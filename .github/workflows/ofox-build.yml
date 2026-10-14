@@ -964,7 +964,7 @@ jobs:
         run: |
           # 把散落各处的日志集中到一个目录，避免路径不存在导致产物为空
           mkdir -p /tmp/diag
-          for f in /tmp/build.log /tmp/lunch.log /tmp/reposync-*.log /tmp/sync-*.log; do
+          for f in /tmp/build.log /tmp/lunch.log /tmp/lunch-choices.log /tmp/envsetup.log /tmp/reposync*.log /tmp/sync-*.log; do
             [ -f "$f" ] && cp "$f" /tmp/diag/ 2>/dev/null
           done
           # 源码树/分支信息
