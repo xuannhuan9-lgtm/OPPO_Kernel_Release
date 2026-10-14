@@ -300,7 +300,6 @@ jobs:
           #   两次的 perf 参数完全相同（bbr+o3+fast），工作流代码也没
           #   碰过 silead。唯一变量是上游两个仓库：
           #     KERNEL_REPO = oppo-source/android_kernel_oppo_sm6375
-          #     DRIVER_REPO = .../android_kernel_modules_and_devicetree_oppo_sm6375
           #   都是 git clone --depth=1 --single-branch ⇒ 拿的永远是
           #   【分支最新 commit】。上游一改，这里就变。
           #
@@ -336,7 +335,6 @@ jobs:
           # ------------------------------------------------------------
           # silead_fp.h 第 203-240 行的平台分支：
           #   #ifdef  BSP_SIL_PLAT_MTK          -> silead_fp_mtk.h
-          #   #elif defined(BSP_SIL_PLAT_QCOM)  -> silead_fp_qcom.h   <- K10x 该走这
           #   #elif defined(BSP_SIL_PLAT_SPRD)  -> silead_fp_sprd.h
           #   #else                             -> silead_fp_comm.h   <- 文件不存在
           #
@@ -666,7 +664,6 @@ jobs:
           #   面具是 main 分支编的：Natives.managerUAPIVersion = 5
           #   我们内核是 builtin 分支：KERNEL_SU_UAPI_VERSION = 2
           #   于是 HomeViewModel.kt:75
-          #     requiresNewKernel = isManager && managerUAPIVersion > kernelUAPIVersion
           #   里 5 > 2 恒成立 → 首页那张「需要更新内核」警告卡一直在，
           #   换任何面具版本、任何签名、改任何 KSU_VERSION 都没用。
           #   而且 Natives.kt:155 isFullFeatured() 要求两个 UAPI 相等，
@@ -703,7 +700,6 @@ jobs:
           # ----------------------------------------------------------------
           # 症状（A31k #5 run 38550611497 实测）：
           #   ../drivers/kernelsu/manager/pkg_observer.c:22:18:
-          #     error: use of undeclared identifier 'TRACK_THRONE_FORCE_SYNCHRONOUS'
           # 原因：上游 commit c89592068e 把 track_throne(false) 换成延迟执行，
           #   新函数里写了 track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)，
           #   但该宏是别的分支才有的，builtin 分支没定义它 ⇒ 上游自己编挂了。
@@ -798,7 +794,6 @@ jobs:
           [ -z "$(find . -name '*.rej')" ] || { echo "::error::仍有 .rej 残留"; find . -name '*.rej'; exit 1; }
 
           # ★ K10x: builtin 分支的 ksu_hooks[] 在本配置下是空的 ——
-          #   key_permission 只给 <4.10；task_fix_setuid 被 #ifndef CONFIG_KSU_SUSFS 排除，
           #   而我们恰好开了 CONFIG_KSU_SUSFS=y。空 hook 表 -> ksu_install_fd() 永不被调用
           #   -> 管理器连不上内核 -> SukiSU Ultra 显示「不支持」。
           #   把它强制编进去：它自己就能调 ksu_install_fd()，不依赖 susfs_zygote_sid。
@@ -811,10 +806,7 @@ jobs:
           #   #ifndef CONFIG_KSU_SUSFS (第183行) 把它注册进 ksu_hooks[]
           # 只改一处会引用到不存在的函数 -> 编译失败。
           # 结构是这样的（202 行）：
-          #    19: #ifdef CONFIG_KSU_SUSFS        <- susfs 那一大段 + ksu_handle_setresuid
-          #   149: #else                         <- static int ksu_task_fix_setuid(...)
           #   176: #endif
-          #   183: #ifndef CONFIG_KSU_SUSFS      <- LSM_HOOK_INIT(task_fix_setuid, ...)
           #   185: #endif
           #
           # ★ 关键：不能只把 19 行改成 #if 1 —— 那样 149 行的 #else 分支就不编译了，
@@ -898,7 +890,6 @@ jobs:
           # ================= 为什么搬 ReSukiSU =================
           # SukiSU builtin 的 feature/selinux_hide.c 只有 24KB，整套机制被
           #   #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0) 挡住；它依赖的
-          #   struct selinux_policy / selinux_state.policy / selinux_state.status_lock
           #   在 5.4 里都不存在（5.4 是 selinux_state.ss->policydb / sidtab）。
           # upstream KernelSU 的 40KB 版本同样只用 5.10+ 结构（它整个 kernel/ 里
           #   KERNEL_VERSION(5,10,0) 出现 0 次，说明早已只服务 GKI 2.0）。
@@ -923,7 +914,6 @@ jobs:
           fetch feature/selinux_hide.c    feature/selinux_hide.c    selinux_hide
           fetch feature/selinux_hide.h    feature/selinux_hide.h    selinux_hide
           fetch compat/kernel_compat.h    compat/kernel_compat.h    KSU_COMPAT
-          # 注意：compat/kernel_compat.c 故意不搬 —— 它和 builtin 自己的 infra/kernel_compat.c
           # 定义了同名全局函数（path_mount / path_umount / ksu_strncpy_from_user_nofault），
           # 一起编进 vmlinux 会 LTO 报 duplicate symbol。
           # 它独有的 7 个函数，我们保留的 selinux_hide.c / symbol_resolver.c / patch_memory.c
@@ -1003,7 +993,6 @@ jobs:
           # 第 1 轮（上一步）已经把 ReSukiSU 的 selinux_hide.c 搬进来了，但它 <5.10 的
           # 假策略要用 backup_policydb / backup_sidtab 这两个全局 —— 它们定义在
           # ReSukiSU 的 selinux/rules.c 里，而那部分没搬，所以编译报
-          #   selinux_hide.c:266: error: use of undeclared identifier 'backup_policydb'
           # 这一步把缺口补上：两个全局 + 备份逻辑 + ksu_dup_policydb/ksu_destroy_policydb。
           # 原则：>=5.10 的代码一个字不动，只加 <5.10 分支。
           KROOT="$BUILD_DIR/KernelSU/kernel"
@@ -1026,15 +1015,10 @@ jobs:
           set -euxo pipefail
 
           # 第 2 轮把 backup 补齐后，编译器把整个 selinux_hide.c 解析到 1036 行，只剩两类问题：
-          #   ① error:   use of undeclared identifier 'ksu_late_loaded'   (916 / 1023 / 1036)
-          #   ② warning: implicit declaration of 'ksu_get_uid_t'         (243/307/454/556)
           #              —— 这个后面会变成链接期 undefined symbol，必须一起修
-          # 根因（①的宏）：builtin 的 infra/kernel_compat.h 和 ReSukiSU 的 compat/kernel_compat.h
           #   用了同一个 include guard __KSU_H_KERNEL_COMPAT，前者先被 include，
           #   于是 ReSukiSU 那份整个被跳过，ksu_get_uid_t 就没了。
           # ③ ksu_policy_rwlock_ptr：<5.10 查上下文时 read_lock 它；builtin 的
-          #   ksu_get_policy_rwlock() 在 KSU_COMPAT_USE_SELINUX_STATE 未定义时返回 NULL，
-          #   5.4 真正的锁是 selinux_state.ss->policy_rwlock，直接指过去，避免 read_lock(NULL)。
           # 我已经把这份 selinux_hide.c 里所有 ksu_*/susfs_* 符号全量扫过一遍：
           #   补完这三个之后，缺失数为 0；而且它一个 susfs_* 都没用到，和 susfs 2.3 无链接牵扯。
           KROOT="$BUILD_DIR/KernelSU/kernel"
@@ -1093,7 +1077,6 @@ jobs:
 
           # A14 之后面具正常了，但 MT 终端等【已授权】的应用仍拿不到 root。
           # 读代码：hook 在解析上下文【之前】先做 PROCESS__SETCURRENT 权限检查：
-          #     error = ksu_avc_has_perm_compat(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
           #     if (error) return error;          <-- A14 只改了后面那处解析失败
           # 而 su 起动时（ksud 会往 /proc/thread-self/attr/current 写 u:r:su:s0，
           # 见 userspace/ksud/src/su.rs:74/353）那个进程通常没有该权限
@@ -1392,7 +1375,6 @@ jobs:
           if [ "${{ inputs.defconfig_source }}" = "dump" ]; then
             # ★按输入强制用手机 dump 的 k10x_defconfig（原厂等价，跳过 Rancemxn 的改动）★
             # 用途：验证传感器起不来是否为 Rancemxn 配置差异所致
-            #   （MSM_ADSP_LOADER=m / QTI_POLICY_ENGINE_SENSOR=m / HORAE_THERMAL_SHELL=m 等）
             echo "::notice title=配置来源::按输入强制使用 dump 的 k10x_defconfig（不用 Rancemxn 的配置）"
             echo "  行数=$(wc -l < "$DEFCONFIG")  =m 个数=$(grep -cE '^CONFIG_[A-Z0-9_]+=m$' "$DEFCONFIG" || true)"
             grep -E '^CONFIG_(MSM_ADSP_LOADER|QTI_POLICY_ENGINE_SENSOR|SENSORS_SSC)' "$DEFCONFIG" || echo "  （这几个符号在 dump 配置里没有 =y/=m 行）"
@@ -1428,7 +1410,6 @@ jobs:
           else
             echo "::warning title=O3::init/Kconfig 没被改到（不影响编译，只是 O3 不会生效）"
           fi
-          # 说明：init/Kconfig 里本来就有 `#endif /* OPLUS_FEATURE_SCHED_ASSIST */` 这类合法注释
           #       （整行以 # 开头 → Kconfig 当注释，无害）。真正会让 `make olddefconfig` exit 2 的，
           #       是把 /* 写到 depends/bool 这种【解析行】上 —— 本步骤的补丁只用 # 注释，已避开。
           if grep -nE '^[[:space:]]*(depends on|bool|tristate|default)[^#]*/\*' "$BUILD_DIR/init/Kconfig"; then
@@ -1486,7 +1467,6 @@ jobs:
             echo "===== 配置来源：$DEFCONFIG ====="
 
             # 第 29 轮：OPPO 的 Kconfig 是 CRLF 行尾，会让 Kconfig 反复 Restart config。
-            # Restart 时交互提问但 stdin=/dev/null -> SHADOW_CALL_STACK 取 N、LTO 取 LTO_NONE
             # -> CFI_CLANG 连锁失效 -> scs.o/cfi.o 不编 -> vendor 模块加载失败 -> 卡二屏。
             # 去掉 \r 即可从源头掐掉 Restart（run#7 只 Restart 1 次所以侥幸没事）。
             echo "===== 第 29 轮：清理 Kconfig 的 CRLF 行尾（掐掉 Restart config）====="
@@ -1771,7 +1751,6 @@ jobs:
           # 注意：KSU_SUSFS_ENABLE_LOG 保持开启 —— 工作流有多处校验要求它为 y，
           #       关掉会让「Configure Kernel 校验」直接失败（A24 就栽在这里）。
           # 只关 SCHEDSTATS：它对每个任务/每个 CPU 一直在累加统计，关掉有真实收益。
-          # ★不要关 SCHED_DEBUG★ —— kernel/sched/Makefile 里 "obj-$(CONFIG_SCHED_DEBUG) += debug.o"，
           #   关掉后 debug.o 不编译，/proc/sys/kernel/sched_* 那些调参项会整段消失（内核管理器就调不了了），
           #   而它本身对性能几乎没影响，得不偿失。
           # DEBUG_LIST 也保持开启：它是链表自检，收益极小、留着更稳。
@@ -2004,7 +1983,6 @@ jobs:
           PLAT_MISSING=""
           # ★第 28 轮修正★ run#20 实测 12 项里 11 项全中，只有 PINCTRL_QCOM 报"无这一行"。
           # 查证：drivers/pinctrl/qcom/Kconfig:4 是 `config PINCTRL_MSM`，
-          #       defconfig:2733 CONFIG_PINCTRL_MSM=y / 2758 CONFIG_PINCTRL_HOLI=y。
           #       PINCTRL_QCOM 这个符号【根本不存在】—— 是我断言写错了，不是配置残废。
           for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS QCOM_SMEM \
                    MSM_SUBSYSTEM_RESTART MSM_SERVICE_LOCATOR ARM_SMMU \
@@ -2018,14 +1996,8 @@ jobs:
           done
           if [ -n "$PLAT_MISSING" ]; then
             echo "::error title=配置残废::这些平台符号不是 y：$PLAT_MISSING"
-            echo "  ⇒ 说明 Kconfig 走了 Restart config 把配置重置了。"
-            echo "  ⇒ 继续编出来的会是【没有 GPU / SCM / iommu 的空壳内核】，刷进去必炸。"
-            echo "  --- 证据：查日志里有没有这几行 ---"
-            echo "     'unmet direct dependencies'  /  'Restart config...'"
-            echo "     'Error in reading or end of file'"
-            grep -c 'Error in reading or end of file' "$RUNNER_TEMP/config.log" 2>/dev/null || true
-            echo "  --- ARCH_QCOM 上下文 ---"
-            grep -an 'ARCH_QCOM\|Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null | head -12 || true
+            echo "  ⇒ Restart config 重置了配置，编出来会是空壳内核。"
+            grep -ac 'Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null || true
             exit 1
           fi
           echo "  OK 12 个平台符号全部 =y（GPU/SCM/iommu/时钟、中断控制器都在）"
@@ -2035,9 +2007,6 @@ jobs:
           # 第 29 轮：SCS/CFI/LTO 是卡二屏的直接原因，最容易在 Restart 时被静默重置。
           # 原厂 .ko 按 SCS+CFI 编，内核必须一致。这里编译前强制写回并硬断言。
           echo "===== 第 29 轮：SCS / CFI / LTO 安全插桩（防卡二屏）====="
-          echo "  修改前："
-          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LD_IS_LLD|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|CFI_CLANG_SHADOW|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
-
           # LTO 是个 choice，必须显式选中 LTO_CLANG 而不是 LTO_NONE
           ./scripts/config --file out/.config --enable  LTO
           ./scripts/config --file out/.config --enable  LTO_CLANG
@@ -2052,9 +2021,7 @@ jobs:
           ./scripts/config --file out/.config --disable CFI_PERMISSIVE 2>/dev/null || true
           ./scripts/config --file out/.config --disable GCOV_KERNEL    2>/dev/null || true
 
-          echo "  修改后："
-          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LD_IS_LLD|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|CFI_CLANG_SHADOW|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
-
+          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
           SCS_MISSING=""
           for k in CC_IS_CLANG LTO LTO_CLANG CFI_CLANG SHADOW_CALL_STACK KALLSYMS; do
             grep -qE "^CONFIG_${k}=y" out/.config || SCS_MISSING="$SCS_MISSING $k"
@@ -2302,8 +2269,6 @@ jobs:
           set -euxo pipefail
           cd "$BUILD_DIR"
           test -f out/.config || { echo "::error title=性能修正::out/.config 不见了"; exit 1; }
-          # 现象：设备上 /proc/config.gz 显示 CONFIG_DEFAULT_TCP_CONG="cubic"、TCP_CONG_BBR 根本没有 →
-          #   因为 TCP_CONG_BBR 依赖 TCP_CONG_ADVANCED，而 olddefconfig 在 perf 步骤之后跑，把改动吃掉了。
           # 修法：在 olddefconfig 之后重新应用一次，并做最终断言。
           case "${{ inputs.perf }}" in
             bbr|bbr+fast|bbr+o3|bbr+o3+fast)
