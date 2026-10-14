@@ -75,9 +75,12 @@ BOARD_KERNEL_PAGESIZE := 4096
 BOARD_BOOT_HEADER_VERSION := 3
 
 # v3 + GKI：内核是未压缩的 Image（不是 Image.gz），与 mojito prebuilt/Image 一致。
-# dtbo 是独立分区（BOARD_KERNEL_SEPARATED_DTBO），所以不打进 boot 头。
+# ★dtbo 不再作为"要构建的镜像"★：我们不编译也不刷 dtbo（原厂 dtbo_a 保持不动，
+#   最终方案只动 boot 分区）。设 true 会让构建系统去找 BOARD_PREBUILT_DTBOIMAGE，
+#   而那个文件我们并不提供 ⇒ 直接改成 false。
+#   （BOARD_DTBOIMG_PARTITION_SIZE 仍保留，只作为分区尺寸描述，不影响构建。）
 BOARD_KERNEL_IMAGE_NAME := Image
-BOARD_KERNEL_SEPARATED_DTBO := true
+BOARD_KERNEL_SEPARATED_DTBO := false
 
 # cmdline：直接照抄 ofox-prep/vendor_boot_a.img 里解析出来的实机 cmdline，
 # 保证进 recovery 后 usb/console 行为与出厂一致。追加 selinux=permissive
@@ -115,11 +118,23 @@ BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
 #   推荐做法：放到 GitHub Release 资产里，由 workflow 用 wget 下载
 #   （具体示例见 ofox-build/README.md「prebuilt 怎么给 CI」一节）
 TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/Image
-TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb.img
-# 新版 AOSP 用的是 BOARD_PREBUILT_DTBIMAGE_DIR（目录形式）；
-# 这里同时给出两种写法，兼容不同分支的 build 系统。
-BOARD_PREBUILT_DTBIMAGE_DIR := $(DEVICE_PATH)/prebuilt
-BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/dtbo.img
+
+# ★★ dtb 绝不进 boot 镜像 ★★（2026-10-14 真机 CI 报错后修正）
+#   实测本机 boot 分区 = header(4096) + kernel(48595008) + ramdisk，
+#   【里面没有 dtb】；dtb 在 vendor_boot 里（vendor_boot dtb_size = 4607565）。
+#   所以必须显式关掉 DTB-in-bootimg，并且【绝对不能】设 BOARD_PREBUILT_DTBIMAGE_DIR：
+#   AOSP build/make/core/board_config.mk:816 会直接报错
+#     "BOARD_PREBUILT_DTBIMAGE_DIR with 'BOARD_INCLUDE_DTB_IN_BOOTIMG != true' is not supported."
+#   （这就是 run #2/#3 卡在 lunch 的原因）
+#   最终镜像由 tools/ofox-splice.py 把橙狐 ramdisk 拼进【原厂 boot 模板】得到，
+#   原厂 kernel/header 逐字节保留，dtb 继续留在 vendor_boot —— 我们根本不碰它。
+BOARD_INCLUDE_DTB_IN_BOOTIMG := false
+
+# 以下三个一律不设（设了就会要求提供 dtb/dtbo 镜像，而我们不需要）：
+#   TARGET_PREBUILT_DTB
+#   BOARD_PREBUILT_DTBIMAGE_DIR
+#   BOARD_PREBUILT_DTBOIMAGE
+# 说明：prebuilt/dtb.img 仍可由 CI 下载备用（仅用于人工核对），但不参与构建。
 
 # ★本机型是 GKI 分离式：recovery 的 ramdisk 要打成一个【独立 boot 镜像】，
 # 之后由手机端 ofox-merge-and-flash.sh 合进原厂 boot 分区。
@@ -127,7 +142,8 @@ BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/dtbo.img
 # 分区，但我们要的正是「产出一个可合并的 recovery 镜像」，两者不冲突）。
 BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
 BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
-BOARD_MKBOOTIMG_ARGS += --dtb $(TARGET_PREBUILT_DTB)
+# 注意：这里【故意不加 --dtb】。原厂 boot 镜像里没有 dtb（见上方说明），
+# 加了会导致 boot 头里混进 dtb、与原厂布局不符；dtb 留在 vendor_boot 不动。
 
 # ============================================================================
 # 3. 分区尺寸 —— 依据：probe.txt /proc/partitions（1K 块）
