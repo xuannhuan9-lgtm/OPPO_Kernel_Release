@@ -1,39 +1,21 @@
 #
-# OPPO K10x 5G (PGGM10 / OP5295) —— OrangeFox 产品注册
+# OPPO K10x 5G (PGGM10 / OP5295) —— 产品注册
 #
-# 这个文件告诉 build 系统「本设备树提供哪些 product」。
-# lunch 的时候能看到的就是下面 COMMON_LUNCH_CHOICES 里的项。
+# ★本文件严格照抄 TWRP 官方设备树（TeamWin/android_device_xiaomi_mojito）
+#   的写法：只声明 PRODUCT_MAKEFILES，【不写 COMMON_LUNCH_CHOICES】。★
 #
-# ★关于 lunch 组合的格式（实测踩过的坑）★
+# 为什么删掉 COMMON_LUNCH_CHOICES（run #7/#8 的教训）：
+#   1) 官方 TWRP 设备树根本没有这个变量，没有它也完全能 lunch；
+#      不写它时，lunch（不带参数）会把 PRODUCT_MAKEFILES 里的每个 product
+#      按 <product>-<release>-<variant> 展开列出，release 由 build 系统自己推导。
+#   2) COMMON_LUNCH_CHOICES 里的条目在部分 AOSP 版本里【会被格式校验】，
+#      混进两段式（fox_PGGM10-eng）这种非法格式，会让整个产品列表用不了。
+#   3) 实测症状：lunch 输出里【一个 fox_PGGM10-* 都没有】，
+#      于是 TARGET_DEVICE/TARGET_PRODUCT 全是「未设置」。
 #
-#   A13 / A14 的 lunch 组合是【三段式】：
-#       <product>-<release>-<variant>   例如 fox_PGGM10-trunk_staging-eng
-#   A12 及以下才是【两段式】：
-#       <product>-<variant>             例如 fox_PGGM10-eng
-#
-#   实测报错（A14 源码树 + 两段式）：
-#       Invalid lunch combo: fox_PGGM10-eng
-#       Valid combos must be of the form <product>-<release>-<variant>
-#   依据：envsetup.sh 里判据是 [[ "$combo" != *-*-* ]]，
-#         即「必须含两个 '-'」，两段式只有 0 个或 1 个，直接判非法。
-#
-#   ★同时列上两种格式是安全的★
-#     COMMON_LUNCH_CHOICES 只是被 product_config.mk 收集，
-#     它【不做】格式校验；格式校验只发生在你手动 lunch 的那一刻。
-#     所以两段式条目在 A14 上只是「不能被直接 lunch」，
-#     不会让 make / 构建失败（已用 GNU make 实测：混合列出 PARSE OK）。
-#
-#   工作流那侧还会自动从 `lunch` 输出的合法组合里挑，
-#   所以即使 release 段不是 trunk_staging 也能兜住。
+# 现在文件回到最小可用形态。lunch 目标由 workflow 自动探测：
+#   优先 fox_PGGM10-<release>-eng，其次 -userdebug/-user。
 #
 
 PRODUCT_MAKEFILES := \
     $(LOCAL_DIR)/fox_PGGM10.mk
-
-COMMON_LUNCH_CHOICES := \
-    fox_PGGM10-trunk_staging-eng \
-    fox_PGGM10-trunk_staging-userdebug \
-    fox_PGGM10-trunk_staging-user \
-    fox_PGGM10-eng \
-    fox_PGGM10-userdebug \
-    fox_PGGM10-user
