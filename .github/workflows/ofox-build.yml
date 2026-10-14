@@ -76,6 +76,10 @@ on:
         description: '是否启用 ccache 加速后续构建'
         type: boolean
         default: true
+      build_target:
+        description: '★通常不用填★ lunch 目标，仅作【兜底】。正常情况 workflow 会自动从 `lunch` 输出里探测合法组合（A13/A14 三段式如 fox_PGGM10-trunk_staging-eng；A12 两段式如 fox_PGGM10-eng），探测不到时才用这个值。留空 = fox_PGGM10-trunk_staging-eng'
+        required: false
+        default: ''
       make_jobs:
         description: '并行编译线程数。GitHub 免费 runner 是 4 核，填 4 最合适；填太大反而会 OOM 被 kill'
         type: string
@@ -102,7 +106,9 @@ jobs:
       CCACHE_COMPRESS: '1'
       DEVICE: PGGM10
       DEVICE_ALT: OP5295
-      BUILD_TARGET: fox_PGGM10-eng
+      # ★只是兜底默认值★ 正常情况下 workflow 会从 `lunch` 输出里自动探测合法组合。
+      # A13/A14 是三段式 <product>-<release>-<variant>，所以默认给三段式。
+      BUILD_TARGET: ${{ inputs.build_target != '' && inputs.build_target || 'fox_PGGM10-trunk_staging-eng' }}
       HELPER_DIR: ${{ github.workspace }}/ofox-build/scripts
       PREBUILT_RELEASE_TAG: ${{ inputs.prebuilt_release_tag }}
       PREBUILT_REPO: ${{ inputs.prebuilt_repo != '' && inputs.prebuilt_repo || github.repository }}
@@ -647,9 +653,6 @@ jobs:
           LOG=/tmp/build.log
           : > "$LOG"
 
-          # ---- 把一段日志里的真实报错逐行打成 ::error:: 注解 ----
-          # GitHub 的注解（annotation）就是靠 ::error:: 产生的；
-          # 只写进 ::group:: 或只 tail 到 stdout 都不会出现在注解里。
           emit_errors() {
             local log="$1" label="$2" n="${3:-25}"
             local found=0
@@ -661,7 +664,6 @@ jobs:
             done < <(grep -n -i -E 'error:|FAILED:|ninja: build stopped|No rule to make|fatal error|undefined reference|Nothing to do|cannot find|No such file' "$log" 2>/dev/null | tail -"$n")
             [ "$found" = "0" ] && echo "（未匹配到典型报错关键字，见下面的结尾上下文）"
             echo "::endgroup::"
-
             echo "::group::$label —— 日志最后 20 行"
             while IFS= read -r line; do
               echo "::error::$label(尾) | $line"
@@ -669,27 +671,89 @@ jobs:
             echo "::endgroup::"
           }
 
-          # ================= 1) lunch =================
-          echo "::group::lunch $BUILD_TARGET"
+          # ================================================================
+          # 1) 探测 lunch 合法组合
+          #
+          # ★不要硬编码 lunch 目标★
+          #   A13/A14 是三段式 <product>-<release>-<variant>
+          #   例如 fox_PGGM10-trunk_staging-eng
+          #   A12 及以下才是两段式 fox_PGGM10-eng。
+          #   硬编码会在换源码树时必挂（run #5 就死在
+          #   "Invalid lunch combo: fox_PGGM10-eng"）。
+          # ================================================================
           set +u
           # shellcheck disable=SC1091
-          source build/envsetup.sh
-          set -e
-          set +e
-          lunch "$BUILD_TARGET" > /tmp/lunch.log 2>&1
-          LRC=$?
-          set -e
-          set +u
-          tail -30 /tmp/lunch.log
+          source build/envsetup.sh > /tmp/envsetup.log 2>&1
           set -u
+
+          echo "::notice::开始探测 lunch 组合"
+          LUNCH_OUT=$(lunch 2>&1 || true)
+          printf '%s\n' "$LUNCH_OUT" > /tmp/lunch-choices.log
+
+          # 把合法组合逐条打成独立 ::error:: 注解（远程诊断唯一渠道）
+          echo "::group::lunch 全部可用组合"
+          printf '%s\n' "$LUNCH_OUT" | head -60 | while IFS= read -r l; do
+            [ -z "$l" ] && continue
+            echo "::error::lunch 可用组合: $l"
+          done
+          echo "::endgroup::"
+
+          # ---- 从中挑选本设备的组合 ----
+          # 优先三段式 + eng；其次任意三段式；再次两段式；最后才用输入的兜底
+          ALLCOMBOS=$(printf '%s\n' "$LUNCH_OUT" | grep -oE 'fox_PGGM10-[A-Za-z0-9_.]+-[A-Za-z0-9_]+' | sort -u)
+          if [ -z "$ALLCOMBOS" ]; then
+            ALLCOMBOS=$(printf '%s\n' "$LUNCH_OUT" | grep -oE 'fox_PGGM10-[A-Za-z0-9_]+' | sort -u)
+          fi
+
+          echo "::error::检测到 fox_PGGM10 组合: $(echo "$ALLCOMBOS" | tr '\n' ' ')"
+
+          TARGET=""
+          TARGET=$(printf '%s\n' "$ALLCOMBOS" | grep -E '^fox_PGGM10-[A-Za-z0-9_.]+-eng$' | head -1)
+          if [ -z "$TARGET" ]; then
+            TARGET=$(printf '%s\n' "$ALLCOMBOS" | grep -E '^fox_PGGM10-[A-Za-z0-9_.]+-(userdebug|user)$' | head -1)
+          fi
+          if [ -z "$TARGET" ]; then
+            TARGET=$(printf '%s\n' "$ALLCOMBOS" | grep -E '^fox_PGGM10-(eng|userdebug|user)$' | head -1)
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo "::error::★lunch 输出里找不到任何 fox_PGGM10 组合★"
+            echo "::error::这说明产品没被注册。请检查："
+            echo "::error::  1) AndroidProducts.mk 的 PRODUCT_MAKEFILES 是否指向 fox_PGGM10.mk"
+            echo "::error::  2) COMMON_LUNCH_CHOICES 是否含 fox_PGGM10-<release>-eng（A13/A14 三段式）"
+            echo "::error::  3) fox_PGGM10.mk 里 PRODUCT_NAME 是否为 fox_PGGM10"
+            echo "::error::  4) device/oppo/PGGM10 是否真的在源码树的正确位置"
+            echo "::error::下面把全部可用组合再完整打一遍，便于判断："
+            printf '%s\n' "$LUNCH_OUT" | tail -80 | while IFS= read -r l; do
+              [ -z "$l" ] && continue
+              echo "::error::全部组合 | $l"
+            done
+            # 退一步：用 workflow input 兜底试一次
+            TARGET="${BUILD_TARGET:-fox_PGGM10-trunk_staging-eng}"
+            echo "::warning::改用输入的兜底目标再试一次: $TARGET"
+          fi
+
+          echo "::error::选定 lunch 目标 = $TARGET（workflow 输入 BUILD_TARGET=${BUILD_TARGET:-未设置}）"
+
+          # ================================================================
+          # 2) 执行 lunch
+          # ================================================================
+          echo "::group::lunch $TARGET"
+          set +e
+          set +u
+          lunch "$TARGET" > /tmp/lunch.log 2>&1
+          LRC=$?
+          set -u
+          set -e
+          tail -30 /tmp/lunch.log
           echo "::endgroup::"
 
           if [ "$LRC" -ne 0 ]; then
-            echo "::error::lunch $BUILD_TARGET 失败（返回 $LRC）"
+            echo "::error::lunch $TARGET 失败（返回 $LRC）"
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               echo "::error::lunch | $line"
-            done < <(grep -n -i -E 'error|not found|does not exist|No such|unknown|invalid|Traceback' /tmp/lunch.log | tail -25)
+            done < <(grep -n -i -E 'error|Invalid lunch|not found|does not exist|No such|unknown|invalid|Traceback' /tmp/lunch.log | tail -25)
             echo "::group::lunch 输出最后 20 行"
             while IFS= read -r line; do
               echo "::error::lunch(尾) | $line"
@@ -699,24 +763,28 @@ jobs:
           fi
 
           echo "::group::构建变量确认"
-          echo "TARGET_DEVICE     = ${TARGET_DEVICE:-未设置}"
-          echo "TARGET_PRODUCT    = ${TARGET_PRODUCT:-未设置}"
+          echo "TARGET_DEVICE        = ${TARGET_DEVICE:-未设置}"
+          echo "TARGET_PRODUCT       = ${TARGET_PRODUCT:-未设置}"
           echo "TARGET_BUILD_VARIANT = ${TARGET_BUILD_VARIANT:-未设置}"
-          echo "OUT_DIR           = ${OUT_DIR:-未设置}"
-          echo "OF_USE_MAGISKBOOT = ${OF_USE_MAGISKBOOT:-未设置}"
-          echo "FOX_VERSION       = ${FOX_VERSION:-未设置}"
+          echo "TARGET_RELEASE       = ${TARGET_RELEASE:-未设置}"
+          echo "OUT_DIR              = ${OUT_DIR:-未设置}"
+          echo "OF_USE_MAGISKBOOT    = ${OF_USE_MAGISKBOOT:-未设置}"
+          echo "FOX_VERSION          = ${FOX_VERSION:-未设置}"
           echo "::endgroup::"
+          echo "::error::lunch 成功：TARGET_DEVICE=${TARGET_DEVICE:-未设置} TARGET_PRODUCT=${TARGET_PRODUCT:-未设置} VARIANT=${TARGET_BUILD_VARIANT:-未设置}"
 
           if [ "${TARGET_DEVICE:-}" != "PGGM10" ]; then
-            echo "::error::lunch 之后 TARGET_DEVICE 不是 PGGM10（实际='${TARGET_DEVICE:-}'）。"
-            echo "::error::已 lunch 过的产品: ${TARGET_PRODUCT:-未设置}"
-            echo "::error::排查: 1) AndroidProducts.mk 里 COMMON_LUNCH_CHOICES 是否含 $BUILD_TARGET"
-            echo "::error::      2) fox_PGGM10.mk 是否被 PRODUCT_MAKEFILES 收录"
+            echo "::error::lunch 之后 TARGET_DEVICE 不是 PGGM10（实际='${TARGET_DEVICE:-}'）"
+            echo "::error::已 lunch 的目标 = $TARGET，TARGET_PRODUCT = ${TARGET_PRODUCT:-未设置}"
+            echo "::error::排查: 1) AndroidProducts.mk 的 PRODUCT_MAKEFILES/COMMON_LUNCH_CHOICES"
+            echo "::error::      2) fox_PGGM10.mk 里 PRODUCT_DEVICE 是否为 PGGM10"
             echo "::error::      3) 设备树是否真的放到了 device/oppo/PGGM10/"
             exit 1
           fi
 
-          # ================= 2) make =================
+          # ================================================================
+          # 3) make
+          # ================================================================
           echo "::group::make recoveryimage -j$MAKE_JOBS"
           set +e
           make -j"$MAKE_JOBS" recoveryimage > "$LOG" 2>&1
@@ -728,8 +796,6 @@ jobs:
           if [ "$RC" -ne 0 ]; then
             echo "::error::编译失败（make 返回 $RC），日志 $LOG（$(wc -l < "$LOG") 行）"
             emit_errors "$LOG" "make" 25
-
-            # 额外：ninja 失败时把首个 FAILED 块的上下文也打出来
             if grep -q 'FAILED:' "$LOG"; then
               echo "::group::首个 FAILED 块上下文"
               START=$(grep -n 'FAILED:' "$LOG" | head -1 | cut -d: -f1)
@@ -742,7 +808,7 @@ jobs:
             exit "$RC"
           fi
           echo "::notice::编译完成（日志 $(wc -l < "$LOG") 行）"
-          echo "$SRC_ROOT" > /tmp/.srcroot_for_diag
+          echo "::error::编译成功，准备收集产物"
 
       - name: 收集产物（橙狐 recovery.img）
         run: |
