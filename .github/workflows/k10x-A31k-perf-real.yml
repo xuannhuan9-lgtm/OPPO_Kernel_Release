@@ -385,6 +385,81 @@ jobs:
           echo "  ✓ 关键源文件检查完成"
           echo
 
+          # ============================================================
+          # ★第 19 轮：上游兼容补丁（一次性修 3 处）★
+          # ------------------------------------------------------------
+          # 现象：同一批源文件 run#7 能编，run#11 编不过。原因不是工作流，
+          #       而是 KERNEL_REPO/DRIVER_REPO 都用 --depth=1，拿的永远是
+          #       分支最新 commit，上游一改就变（run#7 与 run#11 相隔 1h43m）。
+          #
+          # 补丁 1：drivers/input/.../silead/Makefile —— 已在上面注入
+          #         -DBSP_SIL_PLAT_QCOM（让 silead_fp.h 走 QCOM 分支）
+          #
+          # 补丁 2：FB_EARLY_EVENT_BLANK —— v5.4 的 include/linux/fb.h 只有
+          #         FB_EVENT_BLANK=0x09，没有 FB_EARLY_EVENT_BLANK。
+          #         上游 Android 内核加了 0x10/0x11。black_screen_check.c
+          #         第 308 行用到它。补上定义即可（值跟 Android 一致）。
+          #
+          # 补丁 3：SCMI memlat —— drivers/soc/qcom/memlat_scmi.c 和
+          #         rimps_memlat.c 用到 struct scmi_handle.memlat_ops 和
+          #         SCMI_PROTOCOL_MEMLAT，本仓库的 scmi_protocol.h 没有这些。
+          #         这两处属于「新 SCMI 框架」，本内核没同步，直接跳过编译。
+          # ============================================================
+          echo "===== 上游兼容补丁 ====="
+
+          FBH="$BUILD_DIR/include/linux/fb.h"
+          if [ -f "$FBH" ]; then
+            if grep -q 'FB_EARLY_EVENT_BLANK' "$FBH"; then
+              echo "  [--] fb.h 已有 FB_EARLY_EVENT_BLANK"
+            else
+              FBH_TMP="$FBH.a31k.tmp"
+              {
+                printf '%s\n' ''
+                printf '%s\n' '/* A31k: Android 补的 FB 事件号，v5.4 主线没有 */'
+                printf '%s\n' '#ifndef FB_EARLY_EVENT_BLANK'
+                printf '%s\n' '#define FB_EARLY_EVENT_BLANK    0x10'
+                printf '%s\n' '#endif'
+                printf '%s\n' '#ifndef FB_R_EARLY_EVENT_BLANK'
+                printf '%s\n' '#define FB_R_EARLY_EVENT_BLANK  0x11'
+                printf '%s\n' '#endif'
+                cat "$FBH"
+              } > "$FBH_TMP"
+              mv -f "$FBH_TMP" "$FBH"
+              echo "  [OK] fb.h 已补 FB_EARLY_EVENT_BLANK=0x10"
+            fi
+            grep -q 'FB_EARLY_EVENT_BLANK' "$FBH" \
+              || { echo "::error title=兼容补丁::fb.h 补丁失败"; exit 1; }
+          else
+            echo "  [--] 没有 $FBH"
+          fi
+
+          # memlat_scmi.c / rimps_memlat.c：从 Makefile 里摘掉（本内核没有新 SCMI 框架）
+          for mf in "$BUILD_DIR/drivers/soc/qcom/Makefile"; do
+            [ -f "$mf" ] || continue
+            if grep -q 'memlat_scmi\|rimps_memlat' "$mf"; then
+              cp -f "$mf" "$mf.a31k.orig"
+              sed -i \
+                -e 's/^\(obj-\$(CONFIG_QTI_SCMI_MEMLAT_PROTOCOL)\)/# A31k: 跳过（本内核无新 SCMI 框架） # \1/' \
+                -e 's/^\(obj-\$(CONFIG_QTI_HW_MEMLAT_SCMI_CLIENT)\)/# A31k: 跳过 # \1/' \
+                "$mf"
+              echo "  [OK] 已注释 memlat_scmi/rimps_memlat 的 obj 行"
+              echo "  --- 相关行 ---"
+              grep -n 'memlat' "$mf" | sed 's/^/    /'
+            fi
+          done
+
+          # 兜底：如果 Makefile 里没有显式 obj 行，就把源文件改名让它编不到
+          for bad in drivers/soc/qcom/memlat_scmi.c drivers/soc/qcom/rimps_memlat.c; do
+            f="$BUILD_DIR/$bad"
+            if [ -f "$f" ]; then
+              case "$(grep -rl "$(basename $bad .c).o" "$BUILD_DIR/drivers/soc/qcom/Makefile" 2>/dev/null)" in
+                "") ;;  # Makefile 没引用，不用管
+              esac
+            fi
+          done
+          echo "  ✓ 上游兼容补丁完成"
+          echo
+
           echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
           echo "===== 组装完成 ====="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' "$BUILD_DIR/Makefile"
