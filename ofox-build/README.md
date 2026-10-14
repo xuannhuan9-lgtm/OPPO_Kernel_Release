@@ -199,37 +199,74 @@ device/oppo/PGGM10/                ← 或提到仓库根
 外加本流水线新增的 `extract_ofox_ramdisk.py`、`verify_boot_ofox.py`。
 **CI 直接调用仓库里的这些文件，不需要另外 wget。**
 
-### 3.2.1 ★分支回退机制（重要）★
+### 3.2.1 ★源码同步：候选分支与自动回退（重要）★
 
-`fox_14.1` 是首选（Android 14 同代）。但 gitlab.com 在某些网络环境下
-**可能连不上**（本沙箱实测 SSL EOF），所以 workflow 做了**自动回退**：
+**`manifest_source=orangefox`（GitLab 路）** —— 橙狐完整源，含 `OF_*` 专属特性，
+但**依赖 GitLab 可达**。
 
-**候选顺序：** `fox_14.1` → 失败则 `fox_12.1`
+候选分支按序自动尝试（当你保持默认值 `fox_14.1` 时）：
 
-回退发生时，日志里会打出醒目的 `::warning::` 横幅，明确告诉你
-"实际使用分支 ≠ 请求分支"，并重申下面这段风险。
+```
+fox_14.1 → fox_13.1 → fox_12.1 → fox_11.0
+```
 
-> ### ⚠ 跨版本库混用的风险（回退到 fox_12.1 时）
+> 若你**显式**选了其它分支，则**只尝试那一个**，不再回退。
+
+同步方式**优先用橙狐官方脚本**：
+`git clone --depth=1 https://gitlab.com/OrangeFox/sync.git`
+→ `/tmp/ofox-sync/orangefox_sync.sh --branch <分支> --path <目录>`；
+脚本不存在或失败时，回退到
+`repo init -u https://gitlab.com/OrangeFox/manifest.git -b <分支> --depth=1 --no-repo-verify`
++ `repo sync -c -j4 --force-sync --no-clone-bundle`。
+
+**失败时日志里会有**（这就是第一次真机跑失败时缺的东西）：
+
+1. **预检**（全部 `::notice::` 打印，6 条 URL + HTTP 码）：
+   - `https://gitlab.com/OrangeFox/manifest.git/info/refs?service=git-upload-pack`
+   - `https://gitlab.com/OrangeFox/sync.git/info/refs?service=git-upload-pack`
+   - `https://gitlab.com/OrangeFox/manifest/-/raw/<分支>/default.xml`（每个候选分支一条）
+2. **每个分支的真实报错尾部 20 行**（不再吞掉）
+3. 全失败时给出**明确结论**：
+   `GitLab 不可达` / `分支不存在` / `子项目拉取失败`，
+   并提示改用 `manifest_source=twrp_minimal` + `fox_branch=twrp-14.1`
+
+---
+
+**`manifest_source=twrp_minimal`（GitHub 路）** —— 托管在 GitHub，
+**不依赖 GitLab**，GitLab 不通时的可靠退路。分支名是 `twrp-<版本>`：
+
+| 你填的 `fox_branch` | 实际使用 |
+|---|---|
+| `twrp-14.1`（显式） | `twrp-14.1` |
+| `fox_14.1` | `twrp-14.1` ← **已确认存在** |
+| `fox_13.1` | `twrp-13.0` |
+| `fox_12.1` | `twrp-12.1` |
+| `fox_11.0` | `twrp-11.0` |
+
+第一次真机跑（run 38503902702）就是在这条路上——
+`manifest_source=twrp_minimal` + `fox_branch=twrp-14.1`。
+
+> 这条路的 `repo init` 也加了 `--depth=1 --no-repo-verify`，并会先预检
+> GitHub 上该分支的 HTTP 码；同步后校验 `build/envsetup.sh` 是否真的存在。
+
+---
+
+> ### ⚠ 跨版本库混用的风险（回退到非 14 分支时）
 >
-> 目标机是 **Android 14**，橙狐 12.1 分支是 **Android 12.1** 的代码。
-> 两代的 `libc` / `linker` / HAL 接口版本不一致。
+> 目标机是 **Android 14**。若最终用到 `fox_13.x` / `fox_12.x` / `fox_11.x`，
+> 就是跨版本构建，`libc` / `linker` / HAL 接口版本与原厂 ramdisk 不一致。
 >
 > **我们已经挡住的**：通过「原厂 ramdisk 为底 + 白名单覆盖」策略，
 > 正常开机所需的 `init`、`linker64`、`libc`、`init.rc` **全部保持原厂**，
-> 所以**把 Android 搞挂的风险已经被压到很低** —— 最坏情况是橙狐起不来，
+> 所以**把 Android 搞挂的风险已被压到很低** —— 最坏情况是橙狐起不来，
 > 但 Android 照样能进。
 >
 > **仍然存在的**：橙狐 **recovery 二进制自身**仍可能更挑剔 ——
-> 它可能因为找不到 12.1 期望的某个符号而启动失败、黑屏或重启。
+> 可能因找不到期望的符号而启动失败、黑屏或重启。
 > 这类问题不会损坏系统，但会让你进不去橙狐。
 >
-> **建议**：优先想办法用 `fox_14.1`。若只能用 12.1，
-> 刷完后先确认能进 Android（`su -c 'reboot'`），再尝试进橙狐。
-
-**另外**：`minimal-manifest-twrp` 的 **`twrp-14.1` 分支确实存在**（已验证 HTTP 200），
-它是 Android 14 同代、不依赖 gitlab。可以设
-`manifest_source=twrp_minimal` + `fox_branch=twrp-14.1` 作为
-「既要同代、又连不上 gitlab」时的备选（功能比橙狐少，没有 `OF_*` 专属特性）。
+> **建议**：优先 `fox_14.1` 或 `twrp-14.1`；若只能用老分支，
+> 刷前留好备份，刷后先确认能进 Android 再尝试进橙狐。
 
 ### 3.3 触发构建
 
@@ -237,8 +274,8 @@ GitHub → Actions → **"[PGGM10] OrangeFox Recovery 编译"** → Run workflow
 
 | 输入 | 默认 | 说明 |
 |---|---|---|
-| `fox_branch` | **`fox_14.1`** | ★首选★。失败自动回退 `fox_12.1`（会打 warning 横幅，见 §3.2.1）。也可选 `twrp-14.1` |
-| `manifest_source` | `orangefox` | `gitlab.com/OrangeFox/manifest`（完整源，含 `OF_*` 支持）；备选 `twrp_minimal` |
+| `fox_branch` | **`fox_14.1`** | 默认值 = 按序尝试 `14.1→13.1→12.1→11.0`；显式选其它则只试该分支（见 §3.2.1）|
+| `manifest_source` | `orangefox` | 橙狐完整源（依赖 GitLab 可达）；**GitLab 不通就用 `twrp_minimal`**（GitHub 托管）|
 | `device_tree_repo` | 当前仓库 | 留空即可 |
 | `kernel_source` | `release` | 从 Release 资产下载原料 |
 | `prebuilt_release_tag` | `ofox-prebuilt` | 上面那个 tag |
@@ -437,11 +474,18 @@ ofox-flash.sh                          ← ★手机端刷入脚本（工作区�
 A: 单分区双模式**必须**有这两个原料（原厂 ramdisk 作底、原厂 boot 作模板），
    不能用「内核 + dtb」代替。按 §3.1 一并上传到 Release。
 
-**Q: `fox_14.1` 分支不存在 / gitlab 连不上？**
-A: workflow 会**自动回退** `fox_12.1`，并在日志里打 warning 横幅。
-   请务必读 §3.2.1 的跨版本风险说明。若 gitlab 整体不可达，
-   可改用 `manifest_source=twrp_minimal` + `fox_branch=twrp-14.1`
-   （同代、不依赖 gitlab，但功能少）。
+**Q: 同步橙狐源码失败（真机 run 38503902702 就是这个）？**
+A: 看日志里预检的 6 条 URL 的 HTTP 码：
+   - 若 `gitlab.com` 全是 `000`/超时 → **runner 到 GitLab 不通**。
+     改用 `manifest_source=twrp_minimal` + `fox_branch=twrp-14.1`
+     （GitHub 托管、已确认分支存在）。
+   - 若 manifest 预检 200 但某分支 404 → 该分支不存在，
+     workflow 已会自动试下一个候选分支。
+   - 若 manifest 200 但 `repo sync` 报错 → 是子项目拉取问题，
+     日志里有该分支的报错尾部 20 行。
+   注意：GitHub 上那些"橙狐镜像"都残缺不可用
+   （`AirysDark/OrangeFox-manifests` 只列 7 个项目、
+   `LeChenOS/OrangeFox_Twrp_Manifest-` 是空仓库），**不要走 GitHub 镜像**。
 
 **Q: CI 报 `vendor/fox/config/common.mk` 找不到？**
 A: 用 `twrp_minimal` 源时正常。`fox_PGGM10.mk` 已用 `-include` + `wildcard`
