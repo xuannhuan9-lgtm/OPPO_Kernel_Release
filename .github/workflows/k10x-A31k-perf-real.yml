@@ -2483,7 +2483,10 @@ jobs:
           for k in LTO LTO_CLANG THINLTO CFI_CLANG CFI_CLANG_SHADOW SHADOW_CALL_STACK KALLSYMS CC_IS_CLANG; do
             ./scripts/config --file out/.config --enable "$k" 2>/dev/null || true
           done
-          ./scripts/config --file out/.config --disable LTO_NONE 2>/dev/null || true
+          # ★LTO 是 choice：scripts/config 对 choice 无效（文本改了但求值时会反弹），
+          #   必须用 sed 直接删行 + 在 syncconfig 后再校验一次。★
+          sed -i '/^CONFIG_LTO_NONE=y$/d' out/.config 2>/dev/null || true
+          sed -i 's/^# CONFIG_LTO_NONE is not set$/# CONFIG_LTO_NONE is not set/' out/.config 2>/dev/null || true
           grep -E '^CONFIG_(CC_IS_CLANG|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
 
           echo "===== 第 30 轮：编译前主动 syncconfig（对齐时间戳，防编译中途 Restart）====="
@@ -2497,6 +2500,15 @@ jobs:
           grep -E '^CONFIG_(SHADOW_CALL_STACK|LTO_CLANG|CFI_CLANG|KALLSYMS|ARCH_QCOM)=' out/.config | sed 's/^/    /' || true
           echo "  auto.conf 关键项："
           grep -E '^CONFIG_(SHADOW_CALL_STACK|LTO_CLANG|CFI_CLANG|ARCH_QCOM)=' out/include/config/auto.conf 2>/dev/null | sed 's/^/    /' || echo "    （auto.conf 还没有）"
+          # LTO_NONE 是 choice 的另一支，与 LTO_CLANG 不应并存
+          if grep -qE '^CONFIG_LTO_NONE=y' out/.config; then
+            echo "  ⚠ .config 里 LTO_NONE=y 与 LTO_CLANG=y 并存，sed 删掉"
+            sed -i '/^CONFIG_LTO_NONE=y$/d' out/.config
+          fi
+          ARCH=arm64 make O=out syncconfig >/dev/null 2>&1 || true
+          grep -qE '^CONFIG_LTO_NONE=y' out/.config && \
+            echo "::warning title=LTO::LTO_NONE 仍在（choice 默认项，通常无害，但与原厂不一致）" || \
+            echo "  OK LTO_NONE 已清除，只剩 LTO_CLANG"
           PRE_SCS_OK=1
           for k in SHADOW_CALL_STACK LTO_CLANG CFI_CLANG KALLSYMS ARCH_QCOM; do
             grep -qE "^CONFIG_${k}=y" out/.config || { echo "::error title=卡二屏::syncconfig 后 $k 不是 y"; PRE_SCS_OK=0; }
