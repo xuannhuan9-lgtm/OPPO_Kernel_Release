@@ -2293,9 +2293,17 @@ jobs:
               ./scripts/config --file out/.config --enable  DEFAULT_BBR
               ./scripts/config --file out/.config --disable DEFAULT_CUBIC
 
-              # 默认 qdisc：也是 choice，成员叫 DEFAULT_FQ
+              # ★默认 qdisc：三重开关，少一个都不生效★
+              #   net/sched/sch_api.c:243
+              #     #ifdef CONFIG_NET_SCH_DEFAULT          <- 前提！没开整段不编译
+              #     return qdisc_set_default(CONFIG_DEFAULT_NET_SCH);
+              #   net/sched/Kconfig:426 的 choice 成员是 DEFAULT_FQ / DEFAULT_PFIFO_FAST，
+              #   但 choice 的【结果】落在字符串符号 DEFAULT_NET_SCH 上。
+              #   所以必须：NET_SCH_DEFAULT=y + DEFAULT_FQ=y + DEFAULT_NET_SCH="fq"
+              ./scripts/config --file out/.config --enable  NET_SCH_DEFAULT 2>/dev/null || true
               ./scripts/config --file out/.config --enable  DEFAULT_FQ 2>/dev/null || true
               ./scripts/config --file out/.config --disable DEFAULT_PFIFO_FAST 2>/dev/null || true
+              ./scripts/config --file out/.config --set-str DEFAULT_NET_SCH "fq" 2>/dev/null || true
 
               # ------------------------------------------------------------
               # ★第 22 轮：CONFIG_SECTION_MISMATCH_WARN_ONLY★
@@ -2322,7 +2330,7 @@ jobs:
                 || { echo "::error title=性能修正::olddefconfig 失败"; exit 1; }
 
               echo "===== 改之后（olddefconfig 已重跑）====="
-              grep -E '^CONFIG_(TCP_CONG_ADVANCED|TCP_CONG_BBR|DEFAULT_BBR|DEFAULT_CUBIC|DEFAULT_TCP_CONG|NET_SCH_FQ|DEFAULT_FQ|DEFAULT_NET_SCH)=' out/.config || true
+              grep -E '^CONFIG_(TCP_CONG_ADVANCED|TCP_CONG_BBR|DEFAULT_BBR|DEFAULT_CUBIC|DEFAULT_TCP_CONG|NET_SCH_FQ|NET_SCH_DEFAULT|DEFAULT_FQ|DEFAULT_PFIFO_FAST|DEFAULT_NET_SCH)=' out/.config || true
 
               # ★硬断言★
               if ! grep -qE '^CONFIG_TCP_CONG_ADVANCED=y' out/.config; then
@@ -2347,6 +2355,17 @@ jobs:
                 echo "  DEFAULT_CUBIC = $(./scripts/config --file out/.config --state DEFAULT_CUBIC)"
                 exit 1
               fi
+              # ★FQ 三重断言（缺一个 default_qdisc 就还是 pfifo_fast）★
+              QMISS=""
+              grep -qE '^CONFIG_NET_SCH_DEFAULT=y'  out/.config || QMISS="$QMISS NET_SCH_DEFAULT"
+              grep -qE '^CONFIG_DEFAULT_FQ=y'       out/.config || QMISS="$QMISS DEFAULT_FQ"
+              grep -qE '^CONFIG_DEFAULT_NET_SCH="fq"' out/.config || QMISS="$QMISS DEFAULT_NET_SCH"
+              if [ -n "$QMISS" ]; then
+                echo "::error title=配置::默认 qdisc 三项没生效：$QMISS（default_qdisc 会退回 pfifo_fast）"
+                exit 1
+              fi
+              echo "  OK 默认 qdisc 三重开关生效：NET_SCH_DEFAULT=y / DEFAULT_FQ=y / DEFAULT_NET_SCH=\"fq\""
+
               echo "  ✓ BBR 四重断言全部通过："
               echo "     TCP_CONG_ADVANCED = $(./scripts/config --file out/.config --state TCP_CONG_ADVANCED)"
               echo "     TCP_CONG_BBR      = $(./scripts/config --file out/.config --state TCP_CONG_BBR)"
