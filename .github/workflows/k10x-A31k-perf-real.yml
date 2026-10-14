@@ -2206,6 +2206,11 @@ jobs:
           echo "  OK 声卡与 ADSP 关键件（14 个）全部保持 =m"
           echo "::notice title=原厂模块路线(A6e)::techpack 全树 =m 共 $MTOT 个、=y 共 $YTOT 个；声卡/ADSP 关键件全部 =m，交给 same_magic 放行后的原厂 .ko"
 
+      - name: Configure Kernel — 对比 defconfig（诊断，不阻塞）
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          cd "$BUILD_DIR"
           echo "===== KSU / susfs / KPM 配置 ====="
           grep -E 'CONFIG_(KSU|KSU_SUSFS|KPM|KALLSYMS|THREAD_INFO_IN_TASK|KPROBES|KRETPROBES|FTRACE)=' out/.config || true
 
