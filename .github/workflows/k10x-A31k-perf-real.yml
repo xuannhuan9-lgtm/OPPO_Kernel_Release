@@ -1517,13 +1517,28 @@ jobs:
             #       平台符号被正确认到）。这样后面强开时依赖关系是完整的。
             #       强开之后第 1874 行还会再跑一次 olddefconfig 收尾。
             # ------------------------------------------------------------
+            # ★★第 26 轮 · 致命修复★★
+            # run#18 的 diff 铁证：
+            #   < # Linux/arm64 5.4.254 Kernel Configuration   (cp 进去的 defconfig)
+            #   > # Linux/x86   5.4.233 Kernel Configuration   (olddefconfig 之后!)
+            #   < CONFIG_ARM64=y            > CONFIG_X86_64=y
+            #   < CONFIG_CC_IS_CLANG=y      > CONFIG_CC_IS_GCC=y
+            # 原因：这个步骤在配置流程最开头，此时【还没 export ARCH】。
+            #       make 不带 ARCH 就用宿主机的 x86_64 => 加载 arch/x86/Kconfig
+            #       => 所有 arm64 符号(含 ARCH_QCOM)全被当成未知符号删掉。
+            #       (第 1991 行那个 export ARCH=arm64 在【本步骤之后】，救不了这里)
+            # 修法：本步骤开头就 export，并且每条 make 都显式带 ARCH=arm64。
+            export ARCH=arm64 SUBARCH=arm64
+            export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
+            export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
             echo "===== 强开之前先 olddefconfig（保证 .config 与 Kconfig 自洽）====="
+            echo "  ARCH=$ARCH SUBARCH=$SUBARCH（必须都是 arm64，否则会变成 x86 内核）"
             echo "  拷入后行数=$(wc -l < out/.config)  ARCH_QCOM(拷入时)=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★本来就没有★'; } )"
             # ★不要吞输出★ run#16 就是因为 >/dev/null 2>&1 把 Kconfig 的
             #   "Restart config / Error in reading / unmet dependencies"
             #   全吞了，导致查不出 ARCH_QCOM 为什么消失。这次全打出来。
             set +e
-            make -j"$(nproc)" O=out olddefconfig > "$RUNNER_TEMP/preolddef.log" 2>&1
+            ARCH=arm64 make -j"$(nproc)" O=out olddefconfig > "$RUNNER_TEMP/preolddef.log" 2>&1
             PRE_RC=$?
             set -e
             echo "  olddefconfig 返回码=$PRE_RC"
@@ -1579,7 +1594,7 @@ jobs:
             grep -E '^CONFIG_(ARCH_[A-Z0-9_]+|ARM64[A-Z0-9_]*)=y' out/.config | head -20 || true
             echo "  ---- 关键：Kconfig 认不认这些符号（用 conf --listnewconfig）----"
             set +e
-            make O=out listnewconfig > "$RUNNER_TEMP/newcfg.log" 2>&1
+            ARCH=arm64 make O=out listnewconfig > "$RUNNER_TEMP/newcfg.log" 2>&1
             echo "    listnewconfig 返回码=$?"
             head -20 "$RUNNER_TEMP/newcfg.log" 2>/dev/null || true
             set -e
@@ -1591,6 +1606,13 @@ jobs:
             head -4 Makefile 2>/dev/null || true
             echo "    arch/arm64/Kconfig.platforms 的 sha256："
             sha256sum arch/arm64/Kconfig.platforms 2>/dev/null || true
+            echo "  ---- ★必须是 arm64，不能是 x86★ ----"
+            grep -E '^# Linux/(arm64|x86)' out/.config | head -2 || true
+            grep -qE '^# Linux/arm64' out/.config \
+              || { echo "::error title=配置::out/.config 不是 arm64 内核配置（ARCH 丢了会变成 x86）"; head -2 out/.config; exit 1; }
+            grep -qE '^CONFIG_ARM64=y' out/.config \
+              || { echo "::error title=配置::CONFIG_ARM64 不是 y —— make 用了宿主机架构"; exit 1; }
+            echo "  OK 仍是 Linux/arm64 + CONFIG_ARM64=y"
             echo "  ---- 直接问 Kconfig：ARCH_QCOM 的定义能不能被解析出来 ----"
             if [ -x scripts/kconfig/conf ]; then
               echo "    (scripts/kconfig/conf 已存在)"
@@ -1994,7 +2016,10 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
-          make O=out olddefconfig
+          ARCH=arm64 make O=out olddefconfig
+          grep -qE '^CONFIG_ARM64=y' out/.config \
+            || { echo "::error title=配置::主 olddefconfig 之后 CONFIG_ARM64 不是 y（变成 x86 了）"; head -2 out/.config; exit 1; }
+          echo "  ✓ 主 olddefconfig 之后仍是 arm64"
 
           # ============================================================
           # ★第 23 轮 · 第二层防线：平台符号残废检测★
@@ -2253,7 +2278,7 @@ jobs:
           grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|GCC_VERSION|LD_IS_LLD|LTO|THINLTO|CFI_CLANG|MODVERSIONS|SHADOW_CALL_STACK)' out/.config | sort || true
 
           echo "===== 内核版本串 ====="
-          make O=out -s kernelrelease || echo "  （kernelrelease 取不到，不阻塞）" 
+          ARCH=arm64 make O=out -s kernelrelease || echo "  （kernelrelease 取不到，不阻塞）" 
 
       - name: 性能修正 · BBR 与 -O3 真正生效（olddefconfig 之后，第 13 轮）
         shell: bash
@@ -2337,7 +2362,7 @@ jobs:
 
               # ★重跑 olddefconfig 让 Kconfig 解析 choice★
               echo "===== 重跑 olddefconfig（让 Kconfig 接受 DEFAULT_BBR）====="
-              make -j"$(nproc)" O=out olddefconfig >/dev/null 2>&1 \
+              ARCH=arm64 make -j"$(nproc)" O=out olddefconfig >/dev/null 2>&1 \
                 || { echo "::error title=性能修正::olddefconfig 失败"; exit 1; }
 
               echo "===== 改之后（olddefconfig 已重跑）====="
