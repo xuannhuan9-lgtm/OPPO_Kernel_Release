@@ -1485,6 +1485,51 @@ jobs:
           else
             echo "===== 配置来源：$DEFCONFIG ====="
             cp "$DEFCONFIG" out/.config
+            # ------------------------------------------------------------
+            # ★第 23 轮：这里【必须先 olddefconfig 一次】★
+            # ------------------------------------------------------------
+            # run#14 实测真相（差点酿成刷机变砖）：
+            #   cp defconfig -> scripts/config 强开 26 个符号 -> …… -> 第 1874 行
+            #   才跑第一次 olddefconfig。结果 Kconfig 报：
+            #
+            #     WARNING: unmet direct dependencies detected for QCOM_QMI_HELPERS
+            #       Depends on [n]: (ARCH_QCOM [=n] || COMPILE_TEST [=n]) && NET [=y]
+            #       Selected by [y]:
+            #       - MSM_SUBSYSTEM_RESTART [=y]     <- 正是我们强开的
+            #       - MSM_SERVICE_LOCATOR [=y]       <- 也是我们强开的
+            #
+            #   unmet 触发 Kconfig 的 "Restart config..." 全量重走；重走时要交互
+            #   提问，而 stdin 是 /dev/null，于是满屏：
+            #     Qualcomm Platforms (ARCH_QCOM) [N/y/?] (NEW)
+            #     ★Error in reading or end of file.★
+            #   全部取默认 N => ARCH_QCOM=n => 541 个高通 .o 全丢：
+            #     kgsl(GPU) 18->0、qcom_scm 4->0、ARM_SMMU/iommu、clk/qcom、
+            #     pinctrl/qcom、crypto/msm、techpack/camera…
+            #
+            #   最阴险的是 make 不报错，照样 LD vmlinux.o 成功 —— 编出来是个
+            #   【GPU/SCM/iommu 全没有的空壳内核】，刷进去必炸。
+            #
+            # 对比实证：run#7  unmet=0 / Error-in-reading=15 / (NEW)=17
+            #           run#14 unmet=3 / Error-in-reading=206 / (NEW)=215
+            #
+            # 修法：拷完 defconfig 立刻 olddefconfig 一次，让 .config 在
+            #       【强开之前】就已经和当前 Kconfig 树自洽（ARCH_QCOM 等
+            #       平台符号被正确认到）。这样后面强开时依赖关系是完整的。
+            #       强开之后第 1874 行还会再跑一次 olddefconfig 收尾。
+            # ------------------------------------------------------------
+            echo "===== 强开之前先 olddefconfig（保证 .config 与 Kconfig 自洽）====="
+            make -j"$(nproc)" O=out olddefconfig >/dev/null 2>&1 \
+              || { echo "::error title=配置::预 olddefconfig 失败"; exit 1; }
+            echo "  行数=$(wc -l < out/.config)  ARCH_QCOM=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★缺失★'; } )"
+            # ★硬断言：平台符号必须在强开之前就立住★
+            for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS NET; do
+              if ! grep -qE "^CONFIG_${s}=y" out/.config; then
+                echo "::error title=配置::$s 在预 olddefconfig 之后不是 y —— 继续下去会编出残废内核"
+                echo "  当前: $( { grep -E "^CONFIG_${s}=" out/.config || echo '(无这一行)'; } )"
+                exit 1
+              fi
+            done
+            echo "  OK ARCH_QCOM / ARM64 / QCOM_SCM / QCOM_QMI_HELPERS / NET 均为 y"
           fi
 
           LV_IN="${{ inputs.kernel_release_suffix }}"
@@ -1872,6 +1917,42 @@ jobs:
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
           make O=out olddefconfig
+
+          # ============================================================
+          # ★第 23 轮 · 第二层防线：平台符号残废检测★
+          # ------------------------------------------------------------
+          # 第一层（拷完 defconfig 立刻 olddefconfig）治根；这一层兜底。
+          # run#14 编出来的内核 ARCH_QCOM=n（GPU/SCM/iommu 全丢），但
+          # make 完全不报错、LD vmlinux.o 照样成功 —— 只有靠这种硬断言才拦得住。
+          # 这里在【编译之前】检查，拦下来只花 1 分钟，不会浪费 20 分钟编译。
+          # ============================================================
+          echo "===== 平台符号完整性检测（第 23 轮）====="
+          PLAT_MISSING=""
+          for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS QCOM_SMEM \
+                   MSM_SUBSYSTEM_RESTART MSM_SERVICE_LOCATOR ARM_SMMU \
+                   COMMON_CLK_QCOM PINCTRL_QCOM QCOM_GLINK ION_MSM_HEAPS; do
+            if grep -qE "^CONFIG_${s}=y" out/.config; then
+              echo "  ✓ $s"
+            else
+              echo "  ✗ $s = $( { grep -E "^CONFIG_${s}=" out/.config || echo '(无这一行 —— 被 Kconfig 当成未知符号丢掉了)'; } )"
+              PLAT_MISSING="$PLAT_MISSING $s"
+            fi
+          done
+          if [ -n "$PLAT_MISSING" ]; then
+            echo "::error title=配置残废::这些平台符号不是 y：$PLAT_MISSING"
+            echo "  ⇒ 说明 Kconfig 走了 Restart config 把配置重置了。"
+            echo "  ⇒ 继续编出来的会是【没有 GPU / SCM / iommu 的空壳内核】，刷进去必炸。"
+            echo "  --- 证据：查日志里有没有这几行 ---"
+            echo "     'unmet direct dependencies'  /  'Restart config...'"
+            echo "     'Error in reading or end of file'"
+            grep -c 'Error in reading or end of file' "$RUNNER_TEMP/config.log" 2>/dev/null || true
+            echo "  --- ARCH_QCOM 上下文 ---"
+            grep -an 'ARCH_QCOM\|Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null | head -12 || true
+            exit 1
+          fi
+          echo "  OK 12 个平台符号全部 =y（GPU/SCM/iommu/时钟/中断控制器都在）"
+          echo "  ★确认：CONFIG_ARCH_QCOM=y ⇒ kgsl/qcom_scm/ARM_SMMU 等 541 个高通 .o 会正常编译★"
+          echo
 
           echo "===== Droidspaces / NoMount 最终生效值（olddefconfig 之后）====="
           grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|NETFILTER_XT_MATCH_ADDRTYPE|USER_NS|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|TMPFS_POSIX_ACL|TMPFS_XATTR|NOMOUNT|CFS_BANDWIDTH|CGROUP_PIDS|FAIR_GROUP_SCHED)=' out/.config || true
