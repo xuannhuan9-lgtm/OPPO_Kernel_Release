@@ -290,6 +290,57 @@ jobs:
 
           test -f "$BUILD_DIR/Makefile"
           test -f "$BUILD_DIR/scripts/config"
+
+          # ============================================================
+          # ★第 17 轮：编译前源文件完整性校验★
+          # ------------------------------------------------------------
+          # 背景（run #9 实测）：同一个 silead_fp_platform.c，
+          #   run #7 (11:45) 编过，run #9 (12:54) 报
+          #   "fatal error: 'silead_fp_comm.h' file not found"。
+          #   两次的 perf 参数完全相同（bbr+o3+fast），工作流代码也没
+          #   碰过 silead。唯一变量是上游两个仓库：
+          #     KERNEL_REPO = oppo-source/android_kernel_oppo_sm6375
+          #     DRIVER_REPO = .../android_kernel_modules_and_devicetree_oppo_sm6375
+          #   都是 git clone --depth=1 --single-branch ⇒ 拿的永远是
+          #   【分支最新 commit】。上游一改，这里就变。
+          #
+          #   ⇒ 与其等编译到一半炸（要重跑 25 分钟），不如在组装完
+          #     立刻检查。缺文件就明确报出来是哪个仓库哪个 commit。
+          # ============================================================
+          echo "===== 源文件完整性校验 ====="
+          MISSING=0
+          check_file() {
+            f="$1"
+            if [ -f "$BUILD_DIR/$f" ]; then
+              echo "  [OK] $f"
+            else
+              echo "  [!!] 缺失: $f"
+              MISSING=$((MISSING+1))
+            fi
+          }
+          # silead 指纹驱动（run #9 就是它炸的）
+          check_file drivers/input/oplus_fp_drivers/silead/silead_fp.h
+          check_file drivers/input/oplus_fp_drivers/silead/silead_fp_comm.h
+          check_file drivers/input/oplus_fp_drivers/silead/silead_fp_platform.c
+          echo
+          echo "  --- silead 目录实际内容 ---"
+          ls -la "$BUILD_DIR/drivers/input/oplus_fp_drivers/silead/" 2>/dev/null || \
+            echo "  (目录不存在)"
+          echo
+          echo "  --- oplus_fp_drivers 下所有 .h ---"
+          find "$BUILD_DIR/drivers/input/oplus_fp_drivers" -name '*.h' 2>/dev/null | \
+            sed "s|$BUILD_DIR/||" | sort | head -40
+          echo
+          if [ "$MISSING" -gt 0 ]; then
+            echo "::error title=源码不完整::$MISSING 个关键源文件缺失。上游仓库（--depth=1 永远取最新）可能变了。"
+            echo "  DRIVER_REPO 当前 commit:"
+            echo "    $(git -C "$GITHUB_WORKSPACE/devicetree" log -1 --format='%H %ci %s' 2>/dev/null || echo '(.git 已删)')"
+            echo "  ★对策：把缺失的 .h 补进工作流（用 printf 写入），或换个已知可用的 commit★"
+            exit 1
+          fi
+          echo "  ✓ 关键源文件齐全"
+          echo
+
           echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
           echo "===== 组装完成 ====="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)[[:space:]]*=' "$BUILD_DIR/Makefile"
