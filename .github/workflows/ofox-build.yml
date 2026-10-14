@@ -691,12 +691,22 @@ jobs:
           printf '%s\n' "$LUNCH_OUT" > /tmp/lunch-choices.log
 
           # 把合法组合逐条打成独立 ::error:: 注解（远程诊断唯一渠道）
-          echo "::group::lunch 全部可用组合"
-          printf '%s\n' "$LUNCH_OUT" | head -60 | while IFS= read -r l; do
-            [ -z "$l" ] && continue
-            echo "::error::lunch 可用组合: $l"
-          done
+          # ★注解有上限，必须同时写进日志（日志无条数限制）★
+          echo "::group::lunch 原始输出（全部，写进日志）"
+          cat /tmp/lunch-choices.log || true
           echo "::endgroup::"
+          echo "===== lunch 原始输出开始 ====="
+          cat /tmp/lunch-choices.log || true
+          echo "===== lunch 原始输出结束 ====="
+          echo "=== lunch 输出行数: $(wc -l < /tmp/lunch-choices.log) ==="
+          echo "=== 含 PGGM10 的行 ==="
+          grep -n 'PGGM10' /tmp/lunch-choices.log || echo "(没有任何 PGGM10 字样)"
+          echo "=== lunch 输出里的所有 product 名（前 40 个）==="
+          grep -oE '^\s*[a-zA-Z0-9_]+-[a-zA-Z0-9_.]*-[a-z]+' /tmp/lunch-choices.log | head -40 || true
+          echo "=== AndroidProducts.mk 是否被扫到 ==="
+          ls -l device/oppo/PGGM10/AndroidProducts.mk device/oppo/PGGM10/fox_PGGM10.mk 2>&1 | head
+          echo "=== envsetup/lunch 版本线索 ==="
+          grep -nE 'legacy format|lunch --help|<product>-<release>' /tmp/lunch-choices.log | head
 
           # ---- 从中挑选本设备的组合 ----
           # 优先三段式 + eng；其次任意三段式；再次两段式；最后才用输入的兜底
