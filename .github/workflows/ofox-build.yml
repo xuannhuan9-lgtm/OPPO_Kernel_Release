@@ -1,0 +1,624 @@
+name: "[PGGM10] OrangeFox Recovery 编译（OPPO K10x 5G / OP5295 / holi）"
+
+# ===========================================================================
+# 这个工作流产出一个【可直接刷进 boot 分区的橙狐镜像】boot-ofox.img。
+#
+# ★方案：单分区双模式（Android 与橙狐共用 boot 分区）★
+#   本机没有 recovery 分区，原厂 recovery 就在 boot 的 ramdisk 里。
+#   同一个 AOSP init 依据启动模式选择执行哪个 recovery：
+#     · 平时开机            → Android
+#     · adb reboot recovery → misc 的 BCB 通道 → 橙狐
+#
+#   CI 三步（工具在 ofox-build/tools/）：
+#     1) 编出橙狐 ramdisk（make recoveryimage → 解出 ramdisk）
+#     2) ofox-merge-ramdisk.py：把橙狐部件合并进【原厂 ramdisk】
+#        原厂为底，只白名单覆盖 recovery 相关文件；init/linker/libc 等
+#        正常启动所需的一律保留原厂 ⇒ 从根上避免 libc 版本打架
+#     3) ofox-splice.py：把新 ramdisk 拼回【原厂 boot 镜像】
+#        头部与布局逐字节沿用原厂（kernel 区原样照抄，只改头部 @12 的
+#        ramdisk_size，ramdisk 偏移不变）⇒ 对 aboot 与原生镜像同构
+#
+# ★分支必须是 fox_14.1★
+#   目标机是 Android 14，原厂 ramdisk 同代。橙狐用同代分支，
+#   libc/linker/HAL 才对得上。退到 fox_12.1 风险显著上升。
+#
+# 原料（内核/dtb/原厂ramdisk/原厂boot模板）都通过 GitHub Release 资产拿，
+# ★不要 commit 46MB 内核 / 20MB ramdisk / 160MB boot 进公开仓库★。
+# ===========================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      fox_branch:
+        description: '橙狐源码分支。★优先 fox_14.1★（目标机是 Android 14，原厂 ramdisk 同代，libc/linker/HAL 版本才对得上）。若 gitlab 上 fox_14.1 同步失败，会自动回退 fox_12.1 并在日志里显著告警 —— 跨版本混用有风险，详见 README「风险」一节。twrp-14.1 是 minimal-manifest-twrp 的 14 分支（已确认存在），功能少但不依赖 gitlab'
+        type: choice
+        options:
+          - fox_14.1
+          - twrp-14.1
+          - fox_12.1
+        default: fox_14.1
+      manifest_source:
+        description: '源码清单来源。orangefox = gitlab.com/OrangeFox/manifest（★优先★，橙狐完整源，含 OF_* 支持）；twrp_minimal = github.com/minimal-manifest-twrp（备选，同步快但功能少）'
+        type: choice
+        options:
+          - orangefox
+          - twrp_minimal
+        default: orangefox
+      device_tree_repo:
+        description: '设备树仓库（就是本仓库）。留空则用当前仓库。前提：仓库里能找 ofox-build/device/oppo/PGGM10/ 或 device/oppo/PGGM10/'
+        type: string
+        default: ''
+      kernel_source:
+        description: '内核来源。★release = 从 GitHub Release 资产下载原厂内核 Image 与 dtb.img（推荐：原厂固件不适合 commit 进公开仓库）；local = 用仓库里已放好的 ofox-prep/Image + ofox-prep/dtb.img（私有仓库才建议）；custom = 从下面的自定义内核仓库取已编好的 Image'
+        type: choice
+        options:
+          - release
+          - local
+          - custom
+        default: release
+      prebuilt_release_tag:
+        description: 'kernel_source=release 时：存放原厂固件资产的 Release 标签。workflow 会去这个 tag 下找名为 Image 和 dtb.img 的资产'
+        type: string
+        default: 'ofox-prebuilt'
+      prebuilt_repo:
+        description: 'kernel_source=release 时：存放 Release 资产的仓库（形如 用户名/仓库名）。留空则用当前仓库'
+        type: string
+        default: ''
+      custom_kernel_repo:
+        description: 'kernel_source=custom 时：提供已编好 Image 的仓库（形如 用户名/仓库名）'
+        type: string
+        default: 'xuannhuan9-lgtm/OPPO_Kernel_Release'
+      use_ccache:
+        description: '是否启用 ccache 加速后续构建'
+        type: boolean
+        default: true
+      make_jobs:
+        description: '并行编译线程数。GitHub 免费 runner 是 4 核，填 4 最合适；填太大反而会 OOM 被 kill'
+        type: string
+        default: '4'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build OrangeFox for PGGM10
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    env:
+      FOX_BRANCH: ${{ inputs.fox_branch }}
+      MANIFEST_SOURCE: ${{ inputs.manifest_source }}
+      KERNEL_SOURCE: ${{ inputs.kernel_source }}
+      CUSTOM_KERNEL_REPO: ${{ inputs.custom_kernel_repo }}
+      DEVICE_TREE_REPO: ${{ inputs.device_tree_repo != '' && inputs.device_tree_repo || github.repository }}
+      MAKE_JOBS: ${{ inputs.make_jobs }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+      CCACHE_COMPRESS: '1'
+      DEVICE: PGGM10
+      DEVICE_ALT: OP5295
+      BUILD_TARGET: fox_PGGM10-eng
+      HELPER_DIR: ${{ github.workspace }}/ofox-build/scripts
+      PREBUILT_RELEASE_TAG: ${{ inputs.prebuilt_release_tag }}
+      PREBUILT_REPO: ${{ inputs.prebuilt_repo != '' && inputs.prebuilt_repo || github.repository }}
+
+    steps:
+      - name: 检出本仓库（拿到设备树 + 辅助脚本 + ofox-prep 备份）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 环境自检
+        run: |
+          echo "::group::基础环境"
+          echo "runner       : $(uname -a)"
+          echo "CPU 核数      : $(nproc)"
+          echo "内存          : $(free -h | awk '/Mem:/{print $2}')"
+          echo "磁盘可用      : $(df -h "$GITHUB_WORKSPACE" | tail -1 | awk '{print $4}')"
+          echo "repo 分支     : $FOX_BRANCH"
+          echo "manifest 来源 : $MANIFEST_SOURCE"
+          echo "设备树仓库    : $DEVICE_TREE_REPO"
+          echo "内核来源      : $KERNEL_SOURCE"
+          echo "编译目标      : $BUILD_TARGET"
+          echo "::endgroup::"
+          test -d "$HELPER_DIR" || { echo "::error::找不到 $HELPER_DIR"; exit 1; }
+          ls -la "$HELPER_DIR"
+
+      - name: 释放磁盘空间
+        run: |
+          echo "清理前: $(df -h / | tail -1 | awk '{print $4}') 可用"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+                      /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          echo "清理后: $(df -h / | tail -1 | awk '{print $4}') 可用"
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            python3 python3-pip rsync schedtool squashfs-tools xsltproc \
+            zip zlib1g-dev openjdk-11-jdk android-sdk-libsparse-utils \
+            e2fsprogs f2fs-tools unzip xxd
+
+      - name: 配置 git 身份与 repo 工具
+        run: |
+          git config --global user.name  "ofox-ci"
+          git config --global user.email "ofox-ci@localhost"
+          git config --global color.ui false
+          mkdir -p "$HOME/bin"
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/repo" --version
+
+      - name: 同步橙狐源码（OrangeFox 完整 manifest，优先）
+        if: env.MANIFEST_SOURCE == 'orangefox'
+        run: |
+          set -o pipefail
+          mkdir -p fox_src
+          cd fox_src
+
+          # ---- 尝试分支列表：指定的分支 → 失败则回退 fox_12.1 ----
+          TRY_BRANCHES="$FOX_BRANCH"
+          if [ "$FOX_BRANCH" != "fox_12.1" ]; then
+            TRY_BRANCHES="$FOX_BRANCH fox_12.1"
+            echo "::notice::若 $FOX_BRANCH 不可用，将自动回退 fox_12.1"
+          fi
+
+          ROOT=""
+          USED_BRANCH=""
+          for BR in $TRY_BRANCHES; do
+            echo "::group::尝试分支 $BR"
+            rm -rf OrangeFox fox_sync
+            mkdir -p OrangeFox
+            cd OrangeFox
+
+            if "$HOME/bin/repo" init -u https://gitlab.com/OrangeFox/manifest.git -b "$BR" --depth=1 2>&1 | tail -20; then
+              echo "::notice::repo init 成功（$BR），开始 sync"
+              if "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags 2>&1 | tail -40; then
+                if [ -f build/envsetup.sh ]; then
+                  ROOT="$PWD"
+                  USED_BRANCH="$BR"
+                  cd ..
+                  echo "::endgroup::"
+                  break
+                fi
+              fi
+            fi
+            echo "::warning::分支 $BR 同步失败"
+            cd ..
+            echo "::endgroup::"
+          done
+
+          if [ -z "$ROOT" ]; then
+            echo "::error::所有候选分支都同步失败（试过: $TRY_BRANCHES）。"
+            echo "::error::本沙箱/CI 若连不上 gitlab.com，请改用 manifest_source=twrp_minimal。"
+            exit 1
+          fi
+
+          if [ "$USED_BRANCH" != "$FOX_BRANCH" ]; then
+            echo "::warning::════════════════════════════════════════════════════════"
+            echo "::warning::★注意：实际使用分支 $USED_BRANCH，不是请求的 $FOX_BRANCH★"
+            echo "::warning::这是跨版本构建（目标机是 Android 14）。"
+            echo "::warning::我们已经用「原厂 ramdisk 为底 + 白名单覆盖」策略"
+            echo "::warning::挡住了绝大部分库版本冲突（init/linker64/libc 保持原厂），"
+            echo "::warning::但 recovery 二进制自身仍可能更挑剔，风险高于 fox_14.1。"
+            echo "::warning::════════════════════════════════════════════════════════"
+          else
+            echo "::notice::使用分支 $USED_BRANCH"
+          fi
+
+          echo "$ROOT" > "$GITHUB_WORKSPACE/.srcroot"
+          echo "$USED_BRANCH" > "$GITHUB_WORKSPACE/.usedbranch"
+          echo "::notice::源码根 = $ROOT (分支 $USED_BRANCH)"
+
+      - name: 同步 TWRP 精简源码（备选）
+        if: env.MANIFEST_SOURCE == 'twrp_minimal'
+        run: |
+          set -o pipefail
+          rm -rf fox_src
+          mkdir -p fox_src/OrangeFox
+          cd fox_src/OrangeFox
+          echo "::notice::使用 minimal-manifest-twrp twrp-12.1（精简源，没有橙狐专属功能）"
+          "$HOME/bin/repo" init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1 --depth=1
+          "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags 2>&1 | tail -60
+
+      - name: 定位源码根目录
+        id: srcroot
+        run: |
+          ROOT=""
+          # 优先用同步步骤写下的路径
+          if [ -f "$GITHUB_WORKSPACE/.srcroot" ]; then
+            CAND=$(cat "$GITHUB_WORKSPACE/.srcroot")
+            [ -d "$CAND/.repo" ] && ROOT="$CAND"
+          fi
+          if [ -z "$ROOT" ]; then
+            for cand in "$GITHUB_WORKSPACE/fox_src/OrangeFox" \
+                        "$GITHUB_WORKSPACE/fox_src/OrangeFox/OrangeFox" \
+                        "$GITHUB_WORKSPACE/fox_src"; do
+              if [ -d "$cand/.repo" ]; then ROOT="$cand"; break; fi
+            done
+          fi
+          if [ -z "$ROOT" ]; then
+            echo "::error::找不到源码根目录（没有 .repo）。同步步骤可能失败了，看上面的 repo sync 输出。"
+            exit 1
+          fi
+          if [ ! -f "$ROOT/build/envsetup.sh" ]; then
+            echo "::error::$ROOT 下没有 build/envsetup.sh，源码树不完整。"
+            exit 1
+          fi
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          if [ -f "$GITHUB_WORKSPACE/.usedbranch" ]; then
+            echo "::notice::实际使用分支 = $(cat "$GITHUB_WORKSPACE/.usedbranch")"
+          fi
+          echo "::notice::源码根目录 = $ROOT"
+
+      - name: 放入设备树 device/oppo/PGGM10
+        run: |
+          SRC_ROOT="${{ steps.srcroot.outputs.root }}"
+          if [ -d "$GITHUB_WORKSPACE/ofox-build/device/oppo/PGGM10" ]; then
+            SRC_DEV="$GITHUB_WORKSPACE/ofox-build/device/oppo/PGGM10"
+          elif [ -d "$GITHUB_WORKSPACE/device/oppo/PGGM10" ]; then
+            SRC_DEV="$GITHUB_WORKSPACE/device/oppo/PGGM10"
+          else
+            echo "::error::仓库里找不到 device/oppo/PGGM10（试过 ofox-build/ 与根目录）"
+            exit 1
+          fi
+          mkdir -p "$SRC_ROOT/device/oppo"
+          rm -rf "$SRC_ROOT/device/oppo/PGGM10"
+          cp -a "$SRC_DEV" "$SRC_ROOT/device/oppo/PGGM10"
+          echo "::notice::设备树已放入 $SRC_ROOT/device/oppo/PGGM10"
+          ls -la "$SRC_ROOT/device/oppo/PGGM10"
+
+      - name: 准备 prebuilt 与原料（Release 资产，全部 < 25MB）
+        run: |
+          set -e
+          SRC_ROOT="${{ steps.srcroot.outputs.root }}"
+          DEV_DIR="$SRC_ROOT/device/oppo/PGGM10"
+          MAT="$GITHUB_WORKSPACE/materials"
+          TOOLS="$GITHUB_WORKSPACE/ofox-build/tools"
+          mkdir -p "$DEV_DIR/prebuilt" "$MAT"
+
+          REL_REPO="${PREBUILT_REPO:-$DEVICE_TREE_REPO}"
+          REL_TAG="${PREBUILT_RELEASE_TAG}"
+          BASE="https://github.com/${REL_REPO}/releases/download/${REL_TAG}"
+
+          # 下载一个资产；成功返回 0。$1=资产名 $2=目标路径
+          fetch() {
+            echo "::notice::尝试下载资产 $1"
+            if curl -fsSL --retry 3 --retry-delay 2 "$BASE/$1" -o "$2"; then
+              echo "  成功: $(stat -c%s "$2") 字节"
+              return 0
+            fi
+            rm -f "$2"
+            echo "  失败/不存在: $1"
+            return 1
+          }
+
+          # ================= 1) 内核：优先 Image.gz，回退 Image =================
+          if [ "$KERNEL_SOURCE" = "release" ]; then
+            if fetch "Image.gz" "$MAT/Image.gz"; then
+              echo "::notice::解压 Image.gz → prebuilt/Image"
+              gunzip -c "$MAT/Image.gz" > "$DEV_DIR/prebuilt/Image"
+              ISIZE=$(stat -c%s "$DEV_DIR/prebuilt/Image")
+              echo "::notice::解压后大小 = $ISIZE 字节（期望 48595008）"
+            elif fetch "Image" "$DEV_DIR/prebuilt/Image"; then
+              echo "::notice::Release 里是未压缩的 Image，直接使用"
+            else
+              echo "::error::拿不到内核：Release '$REL_TAG' 里 Image.gz 与 Image 都没有。"
+              exit 1
+            fi
+
+          elif [ "$KERNEL_SOURCE" = "local" ]; then
+            echo "::notice::使用仓库里的 ofox-prep/Image"
+            [ -f "$GITHUB_WORKSPACE/ofox-prep/Image" ] || {
+              echo "::error::找不到 ofox-prep/Image"; exit 1; }
+            cp "$GITHUB_WORKSPACE/ofox-prep/Image" "$DEV_DIR/prebuilt/Image"
+
+          else
+            echo "::notice::从 $CUSTOM_KERNEL_REPO 取自定义内核"
+            mkdir -p /tmp/kern
+            URL=$(curl -sL "https://api.github.com/repos/$CUSTOM_KERNEL_REPO/releases/latest" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/' | grep -Ei '/(Image|Image\.gz)$' | head -1)
+            [ -n "$URL" ] || URL="https://raw.githubusercontent.com/$CUSTOM_KERNEL_REPO/main/arch/arm64/boot/Image"
+            echo "下载: $URL"
+            curl -fL "$URL" -o /tmp/kern/Image || {
+              echo "::error::自定义内核下载失败。"; exit 1; }
+            if file /tmp/kern/Image | grep -qi gzip; then
+              gunzip -c /tmp/kern/Image > "$DEV_DIR/prebuilt/Image"
+            else
+              cp /tmp/kern/Image "$DEV_DIR/prebuilt/Image"
+            fi
+          fi
+
+          # ================= 2) dtb.img =================
+          if ! fetch "dtb.img" "$DEV_DIR/prebuilt/dtb.img"; then
+            if [ -f "$GITHUB_WORKSPACE/ofox-prep/dtb.img" ]; then
+              cp "$GITHUB_WORKSPACE/ofox-prep/dtb.img" "$DEV_DIR/prebuilt/dtb.img"
+              echo "::notice::使用仓库里的 ofox-prep/dtb.img"
+            else
+              echo "::error::拿不到 dtb.img"; exit 1
+            fi
+          fi
+
+          # ================= 3) 原厂 ramdisk（合并的底）=================
+          if ! fetch "stock-ramdisk.gz" "$MAT/stock-ramdisk.gz"; then
+            if [ -f "$GITHUB_WORKSPACE/ofox-prep/stock-ramdisk.gz" ]; then
+              cp "$GITHUB_WORKSPACE/ofox-prep/stock-ramdisk.gz" "$MAT/stock-ramdisk.gz"
+              echo "::notice::使用仓库里的 ofox-prep/stock-ramdisk.gz"
+            else
+              echo "::error::拿不到 stock-ramdisk.gz（单分区双模式必需）。"
+              exit 1
+            fi
+          fi
+
+          # ================= 4) boot 模板 =================
+          #   优先用完整的 boot_a.img（如果有，>=50MB，网页端传不上来，通常没有）；
+          #   否则用 boot-header.bin(4096) 在 CI 里重建模板。
+          TEMPLATE_OK=""
+          if fetch "boot_a.img" "$MAT/boot_a.img"; then
+            BSZ=$(stat -c%s "$MAT/boot_a.img")
+            if [ "$BSZ" -ge 50000000 ]; then
+              echo "::notice::使用 Release 里的完整 boot_a.img（$BSZ 字节）"
+              TEMPLATE_OK="full"
+            else
+              echo "::warning::boot_a.img 只有 $BSZ 字节，太小，弃用"
+              rm -f "$MAT/boot_a.img"
+            fi
+          fi
+
+          if [ -z "$TEMPLATE_OK" ]; then
+            if fetch "boot-header.bin" "$MAT/boot-header.bin"; then
+              echo "::notice::用 boot-header.bin 重建 boot 模板"
+              python3 "$TOOLS/rebuild_boot_template.py" \
+                "$MAT/boot-header.bin" "$DEV_DIR/prebuilt/Image" "$MAT/boot_a.img"
+              TEMPLATE_OK="rebuilt"
+            elif [ -f "$GITHUB_WORKSPACE/ofox-prep/boot_a.img" ]; then
+              cp "$GITHUB_WORKSPACE/ofox-prep/boot_a.img" "$MAT/boot_a.img"
+              echo "::notice::使用仓库里的 ofox-prep/boot_a.img"
+              TEMPLATE_OK="local"
+            else
+              echo "::error::拿不到 boot 模板：Release 里既没有 boot_a.img 也没有 boot-header.bin。"
+              echo "::error::单分区双模式必须有原厂 boot 头部作为拼装模板。"
+              exit 1
+            fi
+          fi
+          echo "::notice::boot 模板来源 = $TEMPLATE_OK ($(stat -c%s "$MAT/boot_a.img") 字节)"
+
+          # ================= 5) MANIFEST 校验（可选但推荐）=================
+          if fetch "MANIFEST.txt" "$MAT/MANIFEST.txt"; then
+            echo "::group::按 MANIFEST.txt 校验资产"
+            python3 "$TOOLS/check_manifest.py" "$MAT/MANIFEST.txt" "$MAT" || {
+              echo "::error::资产 sha256 校验未通过，拒绝继续（防止用到下载损坏的文件）"
+              exit 1
+            }
+            echo "::endgroup::"
+          else
+            echo "::warning::Release 里没有 MANIFEST.txt，跳过 sha256 校验"
+          fi
+
+          # ================= 6) 汇总自检 =================
+          echo "::group::内核自检"
+          file "$DEV_DIR/prebuilt/Image" || true
+          KSIZE=$(stat -c%s "$DEV_DIR/prebuilt/Image")
+          KMAGIC=$(head -c4 "$DEV_DIR/prebuilt/Image" | od -An -tx1 | tr -d ' \n')
+          echo "内核: $KSIZE 字节, magic=$KMAGIC (arm64 Image 应为 4d5a0091)"
+          [ "$KSIZE" -ge 1000000 ] || { echo "::error::内核太小"; exit 1; }
+          [ "$KMAGIC" = "4d5a0091" ] && echo "::notice::✓ 标准 arm64 Image" || echo "::warning::内核 magic 非 4d5a0091"
+          echo "::endgroup::"
+
+          echo "::group::dtb 自检"
+          DSIZE=$(stat -c%s "$DEV_DIR/prebuilt/dtb.img")
+          DMAGIC=$(head -c4 "$DEV_DIR/prebuilt/dtb.img" | od -An -tx1 | tr -d ' \n')
+          echo "dtb: $DSIZE 字节, magic=$DMAGIC (FDT 应为 d00dfeed)"
+          [ "$DMAGIC" = "d00dfeed" ] || { echo "::error::dtb magic 不对"; exit 1; }
+          echo "::endgroup::"
+
+          echo "::group::原料汇总"
+          echo "boot 模板 : $(stat -c%s "$MAT/boot_a.img") 字节（来源 $TEMPLATE_OK）"
+          echo "原厂 ramdisk: $(stat -c%s "$MAT/stock-ramdisk.gz") 字节"
+          ls -la "$DEV_DIR/prebuilt" "$MAT"
+          echo "::endgroup::"
+
+      - name: 恢复 ccache
+        if: inputs.use_ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ofox-${{ env.FOX_BRANCH }}-${{ env.DEVICE }}-${{ github.sha }}
+          restore-keys: |
+            ofox-${{ env.FOX_BRANCH }}-${{ env.DEVICE }}-
+            ofox-${{ env.FOX_BRANCH }}-
+
+      - name: lunch 并编译 recoveryimage
+        run: |
+          set -o pipefail
+          SRC_ROOT="${{ steps.srcroot.outputs.root }}"
+          cd "$SRC_ROOT"
+
+          echo "::group::lunch $BUILD_TARGET"
+          set +u
+          source build/envsetup.sh
+          lunch "$BUILD_TARGET" 2>&1 | tail -30
+          set -u
+          echo "::endgroup::"
+
+          echo "::group::构建变量确认"
+          echo "TARGET_DEVICE     = ${TARGET_DEVICE:-未设置}"
+          echo "TARGET_PRODUCT    = ${TARGET_PRODUCT:-未设置}"
+          echo "OF_USE_MAGISKBOOT = ${OF_USE_MAGISKBOOT:-未设置}"
+          echo "FOX_VERSION       = ${FOX_VERSION:-未设置}"
+          echo "::endgroup::"
+
+          if [ "${TARGET_DEVICE:-}" != "PGGM10" ]; then
+            echo "::error::lunch 之后 TARGET_DEVICE 不是 PGGM10（实际='${TARGET_DEVICE:-}'）。检查 AndroidProducts.mk 与 fox_PGGM10.mk。"
+            exit 1
+          fi
+
+          echo "::group::make recoveryimage -j$MAKE_JOBS"
+          set +e
+          make -j"$MAKE_JOBS" recoveryimage 2>&1 | tee /tmp/build.log | tail -80
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::编译失败（make 返回 $RC）"
+            echo "::group::错误上下文（最后 120 行）"
+            tail -120 /tmp/build.log
+            echo "::endgroup::"
+            echo "::group::匹配到的 error 行"
+            grep -nE 'error:|Error [0-9]+|FAILED:' /tmp/build.log | tail -60 || echo "（没匹配到，看上面对应报错块）"
+            echo "::endgroup::"
+            exit "$RC"
+          fi
+          echo "::notice::编译完成"
+
+      - name: 收集产物（橙狐 recovery.img）
+        run: |
+          SRC_ROOT="${{ steps.srcroot.outputs.root }}"
+          OUT="$GITHUB_WORKSPACE/out_artifacts"
+          mkdir -p "$OUT"
+          PROD="$SRC_ROOT/out/target/product/PGGM10"
+
+          echo "::group::搜索 recovery 产物"
+          find "$SRC_ROOT/out" -maxdepth 4 -name 'recovery*.img' 2>/dev/null | head -30
+          echo "::endgroup::"
+
+          FOUND=0
+          for f in "$PROD/recovery.img" "$PROD/boot.img"; do
+            if [ -f "$f" ]; then
+              cp "$f" "$OUT/"
+              echo "::notice::收集到 $(basename "$f") ($(stat -c%s "$f") 字节)"
+              FOUND=1
+            fi
+          done
+
+          for z in "$PROD"/OrangeFox*.zip "$PROD"/*.zip; do
+            [ -f "$z" ] && cp "$z" "$OUT/" && echo "::notice::收集到 $(basename "$z")"
+          done
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::没收集到任何 recovery 镜像。检查上面的 make 输出。"
+            ls -la "$PROD" 2>/dev/null || echo "（$PROD 不存在）"
+            exit 1
+          fi
+
+          echo "::group::产物清单"
+          ls -la "$OUT"
+          sha256sum "$OUT"/* || true
+          echo "::endgroup::"
+
+      - name: 合并 ramdisk 并拼回 boot（产出 boot-ofox.img）
+        run: |
+          set -e
+          OUT="$GITHUB_WORKSPACE/out_artifacts"
+          MAT="$GITHUB_WORKSPACE/materials"
+          TOOLS="$GITHUB_WORKSPACE/ofox-build/tools"
+          IMG="$OUT/recovery.img"
+          LIMIT=167772160
+
+          echo "::group::工具检查"
+          ls -la "$TOOLS"
+          echo "::endgroup::"
+          for t in cpio_tool.py ofox-merge-ramdisk.py ofox-splice.py extract_ofox_ramdisk.py verify_boot_ofox.py; do
+            [ -f "$TOOLS/$t" ] || { echo "::error::缺少工具 $TOOLS/$t"; exit 1; }
+          done
+
+          if [ ! -f "$MAT/boot_a.img" ] || [ ! -f "$MAT/stock-ramdisk.gz" ]; then
+            echo "::error::缺少原料（materials/boot_a.img 模板 或 materials/stock-ramdisk.gz）。"
+            echo "模板会在上一步由 boot-header.bin + Image 自动重建（或直接用完整的 boot_a.img）；"
+            echo "原厂 ramdisk 是合并的底，两个都不能少。请检查 Release 资产。"
+            exit 1
+          fi
+          [ -f "$IMG" ] || { echo "::error::没有 recovery.img，无法合并。"; exit 1; }
+
+          echo "::group::1) 从橙狐 recovery.img 解出 ramdisk"
+          python3 "$TOOLS/extract_ofox_ramdisk.py" "$IMG" "$OUT/ofox-ramdisk.gz"
+          echo "::endgroup::"
+
+          echo "::group::2) 合并 ramdisk（原厂为底 + 橙狐白名单覆盖）"
+          python3 "$TOOLS/ofox-merge-ramdisk.py" --stock "$MAT/stock-ramdisk.gz" --ofox "$OUT/ofox-ramdisk.gz" --out "$OUT/merged-ramdisk.gz" --report "$OUT/merge-report.md"
+          echo "::endgroup::"
+          [ -f "$OUT/merged-ramdisk.gz" ] || { echo "::error::合并失败"; exit 1; }
+
+          echo "::group::3) 拼回 boot 镜像"
+          python3 "$TOOLS/ofox-splice.py" --stock "$MAT/boot_a.img" --ramdisk "$OUT/merged-ramdisk.gz" --out "$OUT/boot-ofox.img"
+          echo "::endgroup::"
+          [ -f "$OUT/boot-ofox.img" ] || { echo "::error::拼装失败"; exit 1; }
+
+          echo "::group::4) 产物严格校验"
+          python3 "$TOOLS/verify_boot_ofox.py" "$OUT/boot-ofox.img" "$MAT/boot_a.img" "$LIMIT"
+          echo "::endgroup::"
+
+          # 清理中间产物，避免 artifact 里混入不必要的大文件
+          rm -f "$OUT/ofox-ramdisk.gz" "$OUT/merged-ramdisk.gz"
+          echo "::notice::最终产物 boot-ofox.img 已就绪（可直接 dd 刷进 boot 分区）"
+
+      - name: 写构建信息（手机端脚本会核对）
+        run: |
+          OUT="$GITHUB_WORKSPACE/out_artifacts"
+          META="$OUT/ofox-build-info.txt"
+          {
+            echo "# OrangeFox 构建信息"
+            echo "device=PGGM10"
+            echo "device_alt=OP5295"
+            echo "soc=holi"
+            echo "flash_mode=single-partition-dual-mode"
+            echo "flash_target=boot"
+            echo "flash_img=boot-ofox.img"
+            echo "enter_recovery=adb reboot recovery (或 root 下 reboot recovery)"
+            echo "note=/data 是 FBE 加密，橙狐大概率解不开，属预期现象"
+            echo "fox_branch=$FOX_BRANCH"
+            echo "manifest_source=$MANIFEST_SOURCE"
+            echo "kernel_source=$KERNEL_SOURCE"
+            echo "build_target=$BUILD_TARGET"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo
+            echo "# 产物 sha256"
+            cd "$OUT" && sha256sum ./* 2>/dev/null | sed 's|\./||'
+          } > "$META"
+          cat "$META"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeFox-PGGM10-bootofox-${{ env.FOX_BRANCH }}-${{ github.run_number }}
+          path: ${{ github.workspace }}/out_artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-PGGM10-${{ github.run_number }}
+          path: /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 失败诊断汇总
+        if: failure()
+        run: |
+          echo "::error::构建失败。按下面顺序排查："
+          echo "  1) 源码同步是否完整（看「同步橙狐源码」步骤 repo sync 的尾部）"
+          echo "  2) device/oppo/PGGM10 是否真进了源码树（看「放入设备树」的 ls 输出）"
+          echo "  3) prebuilt/Image 与 prebuilt/dtb.img 是否存在且大小合理"
+          echo "  4) lunch 是否成功、TARGET_DEVICE 是否为 PGGM10"
+          echo "  5) make 的具体报错（下载 build-log 产物看 /tmp/build.log）"
+          echo ""
+          echo "常见原因速查："
+          echo "  - vendor/fox/config/common.mk 缺失 → 用 twrp_minimal 源时正常，fox_PGGM10.mk 已做回退"
+          echo "  - TARGET_DEVICE 不是 PGGM10 → AndroidProducts.mk 的 PRODUCT_MAKEFILES 路径不对"
+          echo "  - kernel too large → boot 分区 160MB，recovery.img 应远小于它；超了说明内核不对"
+          echo "  - 缺 avbtool → 装 android-sdk-libsparse-utils，或在 BoardConfig 里暂时关掉 BOARD_AVB_ENABLE"
+          echo "  - 内存被 kill（OOM）→ 把 make_jobs 从 4 降到 2"
+          echo "  - Release 资产下载 404 → 确认 tag 与资产名都对：Image.gz / dtb.img / stock-ramdisk.gz / boot-header.bin"
+          echo "  - 合并步骤报缺原料 → 必须有 stock-ramdisk.gz；模板来自 boot-header.bin 自动重建"
+          echo "  - 产物校验 FAIL → 看哪一项没过；kernel 区不一致说明 splice 用错了模板"
