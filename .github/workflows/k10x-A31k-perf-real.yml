@@ -2472,6 +2472,49 @@ jobs:
           export KCFLAGS="-Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-type -Wno-error=incompatible-pointer-types"
           TARGETS="Image.gz Image"
 
+          # ============================================================
+          # ★第 30 轮 · 编译期配置防覆盖（卡二屏最后一道保险）★
+          # ------------------------------------------------------------
+          # run#21 实测时间线：
+          #   15:52:07  .config 核对：SHADOW_CALL_STACK=y  LTO_CLANG=y  CFI_CLANG=y  ✓
+          #   15:52:24  make -j4 -k O=out ... Image.gz Image     ← 开始编译
+          #   15:52:27  drivers/soc/oplus/system/cmdline_parser/Kconfig:34:warning:
+          #             ignoring unsupported character          ← CRLF 又被解析
+          #   15:52:28  * Restart config...                     ← ★Kconfig 重跑★
+          #             Clang Shadow Call Stack (SHADOW_CALL_STACK) [N/y/?] (NEW)
+          #             Error in reading or end of file.       ⇒ N
+          #             Link-Time Optimization (LTO) choice[1-2?]:
+          #             > 1. None (LTO_NONE)                   ⇒ LTO_NONE
+          #   结果：scs.o / cfi.o 一次都没编 ⇒ 原厂 /vendor .ko 加载失败 ⇒ 卡二屏
+          #   （run#7 能开机：scs.o 编了 2 次、cfi.o 编了 1 次）
+          #
+          # 机理：make 发现 .config 比 include/config/auto.conf 新 ⇒ 触发 syncconfig
+          #       ⇒ 而 syncconfig 遇到 CRLF 解析异常就走 Restart，stdin=/dev/null
+          #       让每个提问取默认值 ⇒ 好配置被覆盖。
+          #
+          # 两道保险：
+          #  ①编译前主动 syncconfig 一次，让 auto.conf 与 .config 时间戳对齐，
+          #     make 就不会在编译中途再跑 Kconfig；
+          #  ②编译后立刻验 auto.conf / autoconf.h 里的关键项，一旦被改直接失败，
+          #     不让一个「静默降级」的内核溜进产物。
+          # ============================================================
+          echo "===== 第 30 轮：编译前主动 syncconfig（对齐时间戳，防编译中途 Restart）====="
+          for kf in $(find . -name 'Kconfig*' -type f -not -path './out/*' 2>/dev/null); do
+            grep -qU $'\r' "$kf" 2>/dev/null && sed -i 's/\r$//' "$kf"
+          done
+          echo "  再次去 CR 完成"
+          ARCH=arm64 make O=out syncconfig > "$RUNNER_TEMP/syncconfig.log" 2>&1 || \
+            echo "  （syncconfig 返回非 0，看 log：$(grep -c 'Restart config' "$RUNNER_TEMP/syncconfig.log" || true) 次 Restart）"
+          echo "  syncconfig 后 .config 关键项："
+          grep -E '^CONFIG_(SHADOW_CALL_STACK|LTO_CLANG|CFI_CLANG|KALLSYMS|ARCH_QCOM)=' out/.config | sed 's/^/    /' || true
+          echo "  auto.conf 关键项："
+          grep -E '^CONFIG_(SHADOW_CALL_STACK|LTO_CLANG|CFI_CLANG|ARCH_QCOM)=' out/include/config/auto.conf 2>/dev/null | sed 's/^/    /' || echo "    （auto.conf 还没有）"
+          PRE_SCS_OK=1
+          for k in SHADOW_CALL_STACK LTO_CLANG CFI_CLANG KALLSYMS ARCH_QCOM; do
+            grep -qE "^CONFIG_${k}=y" out/.config || { echo "::error title=卡二屏::syncconfig 后 $k 不是 y"; PRE_SCS_OK=0; }
+          done
+          [ "$PRE_SCS_OK" = 1 ] || exit 1
+
           EXTRA_KSU_VARS=""
           if [ -n "${{ inputs.ksu_manager_package }}" ]; then
             EXTRA_KSU_VARS="$EXTRA_KSU_VARS KSU_MANAGER_PACKAGE=${{ inputs.ksu_manager_package }}"
@@ -2551,6 +2594,34 @@ jobs:
             ann "日志尾部" "$RUNNER_TEMP/tail.txt"
             exit 1
           fi
+
+          # ★第 30 轮 · 编译后硬核对：确保没有「静默降级」★
+          echo "===== 第 30 轮：编译后核对 SCS / CFI / LTO 真的生效 ====="
+          SCS_OBJS=0
+          grep -qE 'CC +arch/arm64/kernel/scs\.o' "$RUNNER_TEMP/build.log" && SCS_OBJS=$((SCS_OBJS+1))
+          grep -qE 'CC +kernel/scs\.o'          "$RUNNER_TEMP/build.log" && SCS_OBJS=$((SCS_OBJS+1))
+          grep -qE 'CC +kernel/cfi\.o'          "$RUNNER_TEMP/build.log" && SCS_OBJS=$((SCS_OBJS+1))
+          echo "  scs.o/cfi.o 编译次数 = $SCS_OBJS（run#7 能开机=3；run#21 卡二屏=0）"
+          echo "  --- 编译期有没有再跑 Restart config ---"
+          RC_CNT="$(grep -c 'Restart config' "$RUNNER_TEMP/build.log" 2>/dev/null || true)"
+          RC_CNT="${RC_CNT:-0}"
+          echo "  Restart config 次数 = $RC_CNT（必须 0）"
+          echo "  --- auto.conf 现在的值 ---"
+          grep -E '^CONFIG_(SHADOW_CALL_STACK|LTO_CLANG|CFI_CLANG|KALLSYMS|ARCH_QCOM)=' out/include/config/auto.conf 2>/dev/null | sed 's/^/    /' || echo "    （读不到 auto.conf）"
+          POST_BAD=""
+          for k in SHADOW_CALL_STACK LTO_CLANG CFI_CLANG KALLSYMS ARCH_QCOM; do
+            grep -qE "^CONFIG_${k}=y" out/.config || POST_BAD="$POST_BAD $k"
+          done
+          grep -qE '^CONFIG_LTO_NONE=y' out/.config && POST_BAD="$POST_BAD LTO_NONE"
+          [ "$SCS_OBJS" -ge 1 ] || POST_BAD="$POST_BAD scs/cfi.o没编"
+          if [ -n "$POST_BAD" ]; then
+            echo "::error title=卡二屏::编译后核对失败：$POST_BAD"
+            echo "  ⇒ 这份 Image 刷进去必然卡二屏（原厂 /vendor/lib/modules/*.ko 是按 SCS+CFI 编的）"
+            echo "  ⇒ 证据：编译期 Restart config $RC_CNT 次"
+            exit 1
+          fi
+          echo "  OK SCS + CFI 真的编进了内核（这次刷进去不会卡二屏）"
+          echo
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
             KVLINE="$(grep -aiE 'version[: ]+[0-9]{4,}' "$RUNNER_TEMP/build.log" | grep -aiE 'ksu|sukisu' | tail -3 | tr '\n' ' ' || true)"
