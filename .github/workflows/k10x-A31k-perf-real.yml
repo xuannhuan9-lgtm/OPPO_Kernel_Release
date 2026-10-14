@@ -2048,9 +2048,13 @@ jobs:
           # ============================================================
           echo "===== 平台符号完整性检测（第 23 轮）====="
           PLAT_MISSING=""
+          # ★第 28 轮修正★ run#20 实测 12 项里 11 项全中，只有 PINCTRL_QCOM 报"无这一行"。
+          # 查证：drivers/pinctrl/qcom/Kconfig:4 是 `config PINCTRL_MSM`，
+          #       defconfig:2733 CONFIG_PINCTRL_MSM=y / 2758 CONFIG_PINCTRL_HOLI=y。
+          #       PINCTRL_QCOM 这个符号【根本不存在】—— 是我断言写错了，不是配置残废。
           for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS QCOM_SMEM \
                    MSM_SUBSYSTEM_RESTART MSM_SERVICE_LOCATOR ARM_SMMU \
-                   COMMON_CLK_QCOM PINCTRL_QCOM QCOM_GLINK ION_MSM_HEAPS; do
+                   COMMON_CLK_QCOM PINCTRL_MSM PINCTRL_HOLI QCOM_GLINK ION_MSM_HEAPS; do
             if grep -qE "^CONFIG_${s}=y" out/.config; then
               echo "  ✓ $s"
             else
