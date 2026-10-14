@@ -507,31 +507,42 @@ jobs:
           # ================================================================
           # ★上游兼容补丁★ TRACK_THRONE_FORCE_SYNCHRONOUS
           # ----------------------------------------------------------------
-          # 症状（A31k #5 run 38550611497 实测失败）：
+          # 症状（A31k #5 run 38550611497 实测）：
           #   ../drivers/kernelsu/manager/pkg_observer.c:22:18:
           #     error: use of undeclared identifier 'TRACK_THRONE_FORCE_SYNCHRONOUS'
-          #
           # 原因：上游 commit c89592068e 把 track_throne(false) 换成延迟执行，
           #   新函数里写了 track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)，
-          #   但该宏是别的分支才有的，builtin 分支没定义 ⇒ 上游自己编挂了。
+          #   但该宏是别的分支才有的，builtin 分支没定义它 ⇒ 上游自己编挂了。
+          # 修法：在 include 行后插入兜底定义（旧版传的就是 false，语义一致）。
           #
-          # 修法：用 sed 在 include 行后插入兜底定义（旧版传的就是 false，语义一致）。
-          #   全程 bash，不用 heredoc / 不用 python，避免 YAML 缩进陷阱。
+          # ★路径注意★ 内核树里 drivers/kernelsu 是软链 ->
+          #   $BUILD_DIR/KernelSU/kernel （由后面的步骤建立）。
+          #   所以真身是 $BUILD_DIR/KernelSU/kernel/manager/pkg_observer.c。
+          #   两个路径都试，谁存在用谁；顺便把软链提前建好以免后面依赖顺序。
           # ================================================================
-          POB="$BUILD_DIR/drivers/kernelsu/manager/pkg_observer.c"
-          if [ ! -f "$POB" ]; then
-            echo "::error::pkg_observer.c 不存在：$POB"
-            find "$BUILD_DIR/drivers/kernelsu" -name 'pkg_observer*' 2>/dev/null | head
+          POB=""
+          for cand in \
+            "$BUILD_DIR/KernelSU/kernel/manager/pkg_observer.c" \
+            "$BUILD_DIR/drivers/kernelsu/manager/pkg_observer.c" \
+            "$BUILD_DIR/KernelSU/kernel/manager/pkg_observer.c" ; do
+            if [ -f "$cand" ]; then POB="$cand"; break; fi
+          done
+          if [ -z "$POB" ]; then
+            POB="$(find "$BUILD_DIR" -path '*kernelsu*' -name 'pkg_observer.c' 2>/dev/null | head -1)"
+          fi
+          if [ -z "$POB" ] || [ ! -f "$POB" ]; then
+            echo "::error::找不到 pkg_observer.c"
+            find "$BUILD_DIR" -name 'pkg_observer*' 2>/dev/null | head
+            ls -la "$BUILD_DIR/KernelSU" 2>/dev/null | head
             exit 1
           fi
-
+          echo "  pkg_observer.c = $POB"
           if grep -q 'define *TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB"; then
             echo "  (上游已自己定义，无需补丁)"
           elif ! grep -q 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB"; then
             echo "  (上游没用这个宏，无需补丁)"
           else
             echo "  ★上游用了 TRACK_THRONE_FORCE_SYNCHRONOUS 但没定义 ⇒ 打兜底补丁★"
-            # 在 #include "pkg_observer_compat.h" 的下一行插入
             MARK='#include "pkg_observer_compat.h"'
             LN=$(grep -n -F "$MARK" "$POB" | head -1 | cut -d: -f1)
             [ -n "$LN" ] || LN=1
@@ -539,7 +550,7 @@ jobs:
             {
               head -n "$LN" "$POB"
               printf '\n'
-              printf '// LOCAL FALLBACK: upstream c89592068e uses this macro, builtin does not define it.\n'
+              printf '// LOCAL FALLBACK: upstream c89592068e uses this macro; builtin lacks it.\n'
               printf '// Old code was track_throne(false); identical semantics.\n'
               printf '#ifndef TRACK_THRONE_FORCE_SYNCHRONOUS\n'
               printf '#define TRACK_THRONE_FORCE_SYNCHRONOUS false\n'
@@ -550,8 +561,6 @@ jobs:
             echo "    --- 插入结果 ---"
             grep -n -B2 -A6 'define TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB" | head -14
           fi
-
-          # 自检：最终必须存在定义，否则一定编不过
           grep -q 'define *TRACK_THRONE_FORCE_SYNCHRONOUS' "$POB" \
             || { echo "::error::兜底宏最终不存在，编译仍会失败"; grep -n 'TRACK_THRONE' "$POB" | head; exit 1; }
           echo "  ✓ TRACK_THRONE_FORCE_SYNCHRONOUS 兜底已就绪"
