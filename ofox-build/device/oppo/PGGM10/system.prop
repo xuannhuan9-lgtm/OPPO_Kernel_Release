@@ -1,0 +1,45 @@
+#
+# recovery 内 system.prop —— 覆盖/补充属性
+# 数值来自 twrp-probe/probe.txt 实测
+#
+
+# --- 产品身份（与实测一致）---
+ro.product.device=OP5295
+ro.product.model=PGGM10
+ro.product.board=holi
+ro.board.platform=holi
+ro.hardware=qcom
+ro.boot.hardware=qcom
+
+# --- 动态分区 ---
+ro.boot.dynamic_partitions=true
+
+# --- ADB：recovery 里不要鉴权，方便电脑直接 adb shell ---
+ro.adb.secure=0
+
+# --- 加密（FBE / 元数据加密）---
+# 本机实测：
+#   ro.crypto.state=encrypted
+#   ro.crypto.type=file
+#   /data 是 f2fs + inlinecrypt
+#   keydirectory=/metadata/vold/metadata_encryption
+# 下面这些告诉 recovery 去 /metadata 找 wrapped key。
+fbe.metadata.wrappedkey=true
+ro.crypto.volume.filenames_mode=aes-256-cts
+ro.crypto.volume.metadata.method=dm-default-key
+ro.crypto.support_metadata_encrypt=true
+ro.crypto.uses_fs_ioc_add_encryption_key=true
+
+# --- Gatekeeper / Keymaster ---
+# 高通的 SPU 在 recovery 里通常不可用，禁掉让 gatekeeper 退回软件实现，
+# 否则解锁图案界面会直接卡死。
+vendor.gatekeeper.disable_spu=true
+
+# --- USB ---
+# ★4e00000.dwc3 是从 vendor_boot_a.img 头里解析出的本机真实值★
+sys.usb.controller=4e00000.dwc3
+vendor.usb.use_ffs_mtp=1
+persist.sys.isUsbOtgEnabled=true
+
+# --- recovery 下关掉厂商硬件 dump（原厂 prop.default 里就是 1）---
+vendor.display.disable_hw_recovery_dump=1
