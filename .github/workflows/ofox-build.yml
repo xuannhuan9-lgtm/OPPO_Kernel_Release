@@ -723,8 +723,12 @@ jobs:
           LUNCH_RC=1
 
           # ---- 策略 A：直接三段式 lunch ----
-          for cand in "fox_PGGM10-trunk_staging-eng" "fox_PGGM10-trunk_staging-userdebug" \
-                      "fox_PGGM10-trunk_staging-user"   "fox_PGGM10-eng"; do
+          # ★release 名字必须是源码树里真实存在的★
+          #   TWRP android-14.1 = ap2a         （实测：Available releases are: ap2a）
+          #   AOSP 主线         = trunk_staging
+          #   run #7~#11 全败在 TARGET_RELEASE: trunk_staging 不存在。
+          for cand in "fox_PGGM10-ap2a-eng" "fox_PGGM10-ap2a-userdebug" \
+                      "fox_PGGM10-ap2a-user" "fox_PGGM10-trunk_staging-eng"; do
             echo "::notice::策略A 尝试 lunch $cand"
             { echo "########## 策略A: lunch $cand ##########"; } >> /tmp/lunch.log
             lunch "$cand" >> /tmp/lunch.log 2>&1
@@ -766,7 +770,7 @@ jobs:
             export TARGET_PRODUCT=fox_PGGM10
             export TARGET_DEVICE=PGGM10
             export TARGET_BUILD_VARIANT=eng
-            export TARGET_RELEASE=trunk_staging
+            export TARGET_RELEASE=ap2a
             export TARGET_BUILD_TYPE=release
             export TARGET_PRODUCT_ALT=OP5295
             export OUT_DIR="${OUT_DIR:-out}"
