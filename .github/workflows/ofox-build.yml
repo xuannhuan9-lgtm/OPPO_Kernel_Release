@@ -182,35 +182,31 @@ jobs:
           # ================================================================
           # 1) 网络 / 分支 预检（全部打印，便于诊断）
           # ================================================================
-          echo "::group::GitLab 连通性与分支预检"
-          GL_OK=1
-          probe() {
-            # $1=URL $2=描述
+          # 预检结果逐条打成独立 ::error:: 注解
+          # ★重要★：GitHub 的注解来自 ::error::；放进 ::group:: 或只 echo 到 stdout
+          # 都不会出现在注解列表里。所以这里是「一条 URL = 一条注解」。
+          echo "::error::预检开始：候选分支 = $CANDIDATES"
+          probe_ann() {
+            # $1=要打印的描述行  $2=URL
             local code
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -L "$1" 2>/dev/null || echo "000")
-            echo "  [$code] $2"
-            echo "        $1"
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -L "$2" 2>/dev/null || echo "000")
+            echo "::error::$1 [$code] $2"
             [ "$code" = "200" ] && return 0 || return 1
           }
 
-          echo "--- GitLab 可达性 ---"
-          probe "https://gitlab.com/OrangeFox/manifest.git/info/refs?service=git-upload-pack" \
-                "manifest 仓库 git-upload-pack" || GL_OK=0
-          probe "https://gitlab.com/OrangeFox/sync.git/info/refs?service=git-upload-pack" \
-                "sync 仓库 git-upload-pack" || GL_OK=0
+          GL_OK=1
+          probe_ann "预检" "https://gitlab.com/OrangeFox/manifest.git/info/refs?service=git-upload-pack" || GL_OK=0
+          probe_ann "预检" "https://gitlab.com/OrangeFox/sync.git/info/refs?service=git-upload-pack" || GL_OK=0
 
-          echo "--- 候选分支 default.xml ---"
           for BR in $CANDIDATES; do
-            probe "https://gitlab.com/OrangeFox/manifest/-/raw/${BR}/default.xml" \
-                  "manifest 分支 ${BR}" || true
+            probe_ann "预检 manifest 分支 $BR" \
+              "https://gitlab.com/OrangeFox/manifest/-/raw/${BR}/default.xml" || true
           done
-          echo "::endgroup::"
 
           if [ "$GL_OK" != "1" ]; then
-            echo "::error::GitLab 不可达（manifest/sync 仓库的 git-upload-pack 预检失败）。"
-            echo "::error::这通常是 runner 出网策略或 GitLab 侧限流导致，与分支名无关。"
+            echo "::error::GitLab 不可达（manifest/sync 仓库的 git-upload-pack 预检失败）"
+            echo "::error::这通常是 runner 出网策略或 GitLab 侧限流导致，与分支名无关"
             echo "::error::建议改用：manifest_source=twrp_minimal + fox_branch=twrp-14.1"
-            echo "::error::（minimal-manifest-twrp 在 GitHub 上，已确认 twrp-14.1 分支存在）"
           fi
 
           # ================================================================
@@ -248,13 +244,21 @@ jobs:
                 else
                   echo "  !! 官方脚本失败，报错尾部 20 行："
                   tail -20 /tmp/sync-$BR.log
+                  echo "::group::分支 $BR 官方脚本报错尾 3 行"
+                  while IFS= read -r l; do
+                    [ -z "$l" ] && continue
+                    echo "::error::分支 $BR 报错(官方脚本): $l"
+                  done < <(tail -3 /tmp/sync-$BR.log 2>/dev/null)
+                  echo "::endgroup::"
                 fi
               else
                 echo "  !! sync 仓库里没有 orangefox_sync.sh / sync.sh"
                 ls -la /tmp/ofox-sync
+                echo "::error::分支 $BR 报错(官方脚本): sync 仓库里没有 orangefox_sync.sh / sync.sh"
               fi
             else
               echo "  !! sync 仓库克隆失败"
+              echo "::error::分支 $BR 报错(git clone): 无法克隆 https://gitlab.com/OrangeFox/sync.git"
             fi
 
             # ---- 方式 B：repo init + repo sync（回退）----
@@ -270,9 +274,16 @@ jobs:
                 else
                   echo "  !! repo sync 失败，报错尾部 20 行："
                   tail -20 /tmp/reposync-$BR.log
+                  echo "::group::分支 $BR repo sync 报错尾 3 行"
+                  while IFS= read -r l; do
+                    [ -z "$l" ] && continue
+                    echo "::error::分支 $BR 报错(repo sync): $l"
+                  done < <(tail -3 /tmp/reposync-$BR.log 2>/dev/null)
+                  echo "::endgroup::"
                 fi
               else
                 echo "  !! repo init 失败（该分支可能不存在）"
+                echo "::error::分支 $BR 报错(repo init): 该分支可能不存在或 manifest 不可达"
               fi
               cd "$GITHUB_WORKSPACE/fox_src"
             fi
@@ -300,6 +311,9 @@ jobs:
             echo "::error::  3) manifest 引用的子项目拉取失败（repo sync 报错见上）"
             echo "::error::解决办法：改用 manifest_source=twrp_minimal + fox_branch=twrp-14.1"
             echo "::error::（minimal-manifest-twrp 托管在 GitHub，不依赖 GitLab）"
+            for BR in $CANDIDATES; do
+              echo "::error::分支 $BR 同步失败"
+            done
             exit 1
           fi
 
@@ -529,7 +543,7 @@ jobs:
           # ================= 5) MANIFEST 校验（可选但推荐）=================
           if fetch "MANIFEST.txt" "$MAT/MANIFEST.txt"; then
             echo "::group::按 MANIFEST.txt 校验资产"
-            python3 "$TOOLS/check_manifest.py" "$MAT/MANIFEST.txt" "$MAT" || {
+            python3 "$TOOLS/check_manifest.py" "$MAT/MANIFEST.txt" "$MAT" "$DEV_DIR/prebuilt" || {
               echo "::error::资产 sha256 校验未通过，拒绝继续（防止用到下载损坏的文件）"
               exit 1
             }
@@ -577,43 +591,105 @@ jobs:
           SRC_ROOT="${{ steps.srcroot.outputs.root }}"
           cd "$SRC_ROOT"
 
+          LOG=/tmp/build.log
+          : > "$LOG"
+
+          # ---- 把一段日志里的真实报错逐行打成 ::error:: 注解 ----
+          # GitHub 的注解（annotation）就是靠 ::error:: 产生的；
+          # 只写进 ::group:: 或只 tail 到 stdout 都不会出现在注解里。
+          emit_errors() {
+            local log="$1" label="$2" n="${3:-25}"
+            local found=0
+            echo "::group::$label —— 匹配到的报错行"
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "::error::$label | $line"
+              found=$((found+1))
+            done < <(grep -n -i -E 'error:|FAILED:|ninja: build stopped|No rule to make|fatal error|undefined reference|Nothing to do|cannot find|No such file' "$log" 2>/dev/null | tail -"$n")
+            [ "$found" = "0" ] && echo "（未匹配到典型报错关键字，见下面的结尾上下文）"
+            echo "::endgroup::"
+
+            echo "::group::$label —— 日志最后 20 行"
+            while IFS= read -r line; do
+              echo "::error::$label(尾) | $line"
+            done < <(tail -20 "$log" 2>/dev/null)
+            echo "::endgroup::"
+          }
+
+          # ================= 1) lunch =================
           echo "::group::lunch $BUILD_TARGET"
           set +u
+          # shellcheck disable=SC1091
           source build/envsetup.sh
-          lunch "$BUILD_TARGET" 2>&1 | tail -30
+          set -e
+          set +e
+          lunch "$BUILD_TARGET" > /tmp/lunch.log 2>&1
+          LRC=$?
+          set -e
+          set +u
+          tail -30 /tmp/lunch.log
           set -u
           echo "::endgroup::"
+
+          if [ "$LRC" -ne 0 ]; then
+            echo "::error::lunch $BUILD_TARGET 失败（返回 $LRC）"
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "::error::lunch | $line"
+            done < <(grep -n -i -E 'error|not found|does not exist|No such|unknown|invalid|Traceback' /tmp/lunch.log | tail -25)
+            echo "::group::lunch 输出最后 20 行"
+            while IFS= read -r line; do
+              echo "::error::lunch(尾) | $line"
+            done < <(tail -20 /tmp/lunch.log)
+            echo "::endgroup::"
+            exit "$LRC"
+          fi
 
           echo "::group::构建变量确认"
           echo "TARGET_DEVICE     = ${TARGET_DEVICE:-未设置}"
           echo "TARGET_PRODUCT    = ${TARGET_PRODUCT:-未设置}"
+          echo "TARGET_BUILD_VARIANT = ${TARGET_BUILD_VARIANT:-未设置}"
+          echo "OUT_DIR           = ${OUT_DIR:-未设置}"
           echo "OF_USE_MAGISKBOOT = ${OF_USE_MAGISKBOOT:-未设置}"
           echo "FOX_VERSION       = ${FOX_VERSION:-未设置}"
           echo "::endgroup::"
 
           if [ "${TARGET_DEVICE:-}" != "PGGM10" ]; then
-            echo "::error::lunch 之后 TARGET_DEVICE 不是 PGGM10（实际='${TARGET_DEVICE:-}'）。检查 AndroidProducts.mk 与 fox_PGGM10.mk。"
+            echo "::error::lunch 之后 TARGET_DEVICE 不是 PGGM10（实际='${TARGET_DEVICE:-}'）。"
+            echo "::error::已 lunch 过的产品: ${TARGET_PRODUCT:-未设置}"
+            echo "::error::排查: 1) AndroidProducts.mk 里 COMMON_LUNCH_CHOICES 是否含 $BUILD_TARGET"
+            echo "::error::      2) fox_PGGM10.mk 是否被 PRODUCT_MAKEFILES 收录"
+            echo "::error::      3) 设备树是否真的放到了 device/oppo/PGGM10/"
             exit 1
           fi
 
+          # ================= 2) make =================
           echo "::group::make recoveryimage -j$MAKE_JOBS"
           set +e
-          make -j"$MAKE_JOBS" recoveryimage 2>&1 | tee /tmp/build.log | tail -80
-          RC=${PIPESTATUS[0]}
+          make -j"$MAKE_JOBS" recoveryimage > "$LOG" 2>&1
+          RC=$?
           set -e
+          tail -40 "$LOG"
           echo "::endgroup::"
 
           if [ "$RC" -ne 0 ]; then
-            echo "::error::编译失败（make 返回 $RC）"
-            echo "::group::错误上下文（最后 120 行）"
-            tail -120 /tmp/build.log
-            echo "::endgroup::"
-            echo "::group::匹配到的 error 行"
-            grep -nE 'error:|Error [0-9]+|FAILED:' /tmp/build.log | tail -60 || echo "（没匹配到，看上面对应报错块）"
-            echo "::endgroup::"
+            echo "::error::编译失败（make 返回 $RC），日志 $LOG（$(wc -l < "$LOG") 行）"
+            emit_errors "$LOG" "make" 25
+
+            # 额外：ninja 失败时把首个 FAILED 块的上下文也打出来
+            if grep -q 'FAILED:' "$LOG"; then
+              echo "::group::首个 FAILED 块上下文"
+              START=$(grep -n 'FAILED:' "$LOG" | head -1 | cut -d: -f1)
+              sed -n "$((START>5?START-5:1)),$((START+25))p" "$LOG" | while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                echo "::error::FAILED块 | $line"
+              done
+              echo "::endgroup::"
+            fi
             exit "$RC"
           fi
-          echo "::notice::编译完成"
+          echo "::notice::编译完成（日志 $(wc -l < "$LOG") 行）"
+          echo "$SRC_ROOT" > /tmp/.srcroot_for_diag
 
       - name: 收集产物（橙狐 recovery.img）
         run: |
@@ -731,31 +807,98 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: 上传编译日志与诊断信息
+        if: always()
+        run: |
+          # 把散落各处的日志集中到一个目录，避免路径不存在导致产物为空
+          mkdir -p /tmp/diag
+          for f in /tmp/build.log /tmp/lunch.log /tmp/reposync-*.log /tmp/sync-*.log; do
+            [ -f "$f" ] && cp "$f" /tmp/diag/ 2>/dev/null
+          done
+          # 源码树/分支信息
+          [ -f "$GITHUB_WORKSPACE/.usedbranch" ] && cp "$GITHUB_WORKSPACE/.usedbranch" /tmp/diag/ 2>/dev/null
+          [ -f "$GITHUB_WORKSPACE/.srcroot" ] && cp "$GITHUB_WORKSPACE/.srcroot" /tmp/diag/ 2>/dev/null
+          # 产物清单
+          {
+            echo "=== run ${{ github.run_number }} ==="
+            echo "FOX_BRANCH(input) = $FOX_BRANCH"
+            echo "MANIFEST_SOURCE   = $MANIFEST_SOURCE"
+            echo "BUILD_TARGET      = $BUILD_TARGET"
+            echo "usedbranch        = $(cat "$GITHUB_WORKSPACE/.usedbranch" 2>/dev/null || echo 未知)"
+            echo "srcroot           = $(cat "$GITHUB_WORKSPACE/.srcroot" 2>/dev/null || echo 未知)"
+            echo ""
+            echo "=== out_artifacts 清单 ==="
+            ls -la "$GITHUB_WORKSPACE/out_artifacts" 2>/dev/null || echo "（无）"
+            echo ""
+            echo "=== 设备树 prebuilt 清单 ==="
+            ls -la "${{ steps.srcroot.outputs.root }}/device/oppo/PGGM10/prebuilt" 2>/dev/null || echo "（无）"
+            echo ""
+            echo "=== materials 清单 ==="
+            ls -la "$GITHUB_WORKSPACE/materials" 2>/dev/null || echo "（无）"
+          } > /tmp/diag/INVENTORY.txt 2>&1
+          ls -la /tmp/diag
+
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-PGGM10-${{ github.run_number }}
-          path: /tmp/build.log
-          if-no-files-found: ignore
+          path: /tmp/diag/*
+          if-no-files-found: warn
           retention-days: 7
 
       - name: 失败诊断汇总
         if: failure()
         run: |
-          echo "::error::构建失败。按下面顺序排查："
-          echo "  1) 源码同步是否完整（看「同步橙狐源码」步骤 repo sync 的尾部）"
-          echo "  2) device/oppo/PGGM10 是否真进了源码树（看「放入设备树」的 ls 输出）"
-          echo "  3) prebuilt/Image 与 prebuilt/dtb.img 是否存在且大小合理"
-          echo "  4) lunch 是否成功、TARGET_DEVICE 是否为 PGGM10"
-          echo "  5) make 的具体报错（下载 build-log 产物看 /tmp/build.log）"
-          echo ""
-          echo "常见原因速查："
-          echo "  - vendor/fox/config/common.mk 缺失 → 用 twrp_minimal 源时正常，fox_PGGM10.mk 已做回退"
-          echo "  - TARGET_DEVICE 不是 PGGM10 → AndroidProducts.mk 的 PRODUCT_MAKEFILES 路径不对"
-          echo "  - kernel too large → boot 分区 160MB，recovery.img 应远小于它；超了说明内核不对"
-          echo "  - 缺 avbtool → 装 android-sdk-libsparse-utils，或在 BoardConfig 里暂时关掉 BOARD_AVB_ENABLE"
-          echo "  - 内存被 kill（OOM）→ 把 make_jobs 从 4 降到 2"
-          echo "  - Release 资产下载 404 → 确认 tag 与资产名都对：Image.gz / dtb.img / stock-ramdisk.gz / boot-header.bin"
-          echo "  - 合并步骤报缺原料 → 必须有 stock-ramdisk.gz；模板来自 boot-header.bin 自动重建"
-          echo "  - 产物校验 FAIL → 看哪一项没过；kernel 区不一致说明 splice 用错了模板"
+          ROOT="$(cat "$GITHUB_WORKSPACE/.srcroot" 2>/dev/null || echo 未知)"
+          USED="$(cat "$GITHUB_WORKSPACE/.usedbranch" 2>/dev/null || echo 未知)"
+          echo "::error::════════ 构建失败诊断 ════════"
+          echo "::error::TARGET_DEVICE  = ${TARGET_DEVICE:-未设置}"
+          echo "::error::TARGET_PRODUCT = ${TARGET_PRODUCT:-未设置}"
+          echo "::error::BUILD_TARGET   = ${BUILD_TARGET:-未设置}"
+          echo "::error::源码根         = $ROOT"
+          echo "::error::使用分支       = $USED"
+          echo "::error::请求分支       = ${FOX_BRANCH:-未设置}"
+          echo "::error::MANIFEST_SOURCE= ${MANIFEST_SOURCE:-未设置}"
+          echo "::error::────────────────────────────"
+
+          # 把编译日志里的真实报错再打一遍注解（防止只在 build 步骤里出现过）
+          if [ -f /tmp/build.log ]; then
+            echo "::error::build.log 共 $(wc -l < /tmp/build.log) 行，下面重放关键报错："
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "::error::build | $line"
+            done < <(grep -n -i -E 'error:|FAILED:|ninja: build stopped|No rule to make|fatal error|undefined reference|Nothing to do|cannot find|No such file' /tmp/build.log 2>/dev/null | tail -20)
+            echo "::error::build.log 结尾："
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "::error::build(尾) | $line"
+            done < <(tail -10 /tmp/build.log)
+          else
+            echo "::error::没有 /tmp/build.log —— 说明失败发生在 make 之前（多半是同步或 lunch）"
+          fi
+
+          if [ -f /tmp/lunch.log ]; then
+            echo "::error::lunch.log 结尾 10 行："
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "::error::lunch(尾) | $line"
+            done < <(tail -10 /tmp/lunch.log)
+          fi
+
+          echo "::error::────────────────────────────"
+          echo "::error::按下面顺序排查："
+          echo "::error::  1) 源码同步是否完整（看「同步」步骤的注解）"
+          echo "::error::  2) device/oppo/PGGM10 是否真进了源码树"
+          echo "::error::  3) prebuilt/Image 是否存在且大小合理"
+          echo "::error::  4) lunch 是否成功、TARGET_DEVICE 是否为 PGGM10"
+          echo "::error::  5) make 的具体报错（看上面的 build 注解）"
+          echo "::error::────────────────────────────"
+          echo "::error::常见原因速查："
+          echo "::error::  - GitLab 不可达 → 改用 manifest_source=twrp_minimal + fox_branch=twrp-14.1"
+          echo "::error::  - BOARD_PREBUILT_DTBIMAGE_DIR 与 BOARD_INCLUDE_DTB_IN_BOOTIMG 冲突 → 只能设前者当后者为 true"
+          echo "::error::  - TARGET_DEVICE 不是 PGGM10 → AndroidProducts.mk 的 PRODUCT_MAKEFILES/COMMON_LUNCH_CHOICES 不对"
+          echo "::error::  - vendor/fox 与 vendor/twrp 的 common.mk 都不存在 → fox_PGGM10.mk 会走内置兜底"
+          echo "::error::  - 内存被 kill（OOM）→ 把 make_jobs 从 4 降到 2"
+          echo "::error::  - 缺 avbtool → 装 android-sdk-libsparse-utils"
+          echo "::error::  - 产物校验 FAIL → 看哪一项没过；kernel 区不一致说明 splice 用错了模板"
