@@ -467,7 +467,10 @@ jobs:
           ML_LEFT=0
           for mf in "$BUILD_DIR/drivers/soc/qcom/Makefile" "$BUILD_DIR/drivers/soc/qcom/scmi/Makefile"; do
             [ -f "$mf" ] || continue
-            n=$(grep -E '(memlat_scmi|rimps_memlat)\.o' "$mf" | grep -vc '^[[:space:]]*#')
+            # 注意：set -e 下 grep 无匹配返回 1，会【反向】把「已修好」判成失败
+            # （run#13 正是这么挂的：n=0 之后立刻 exit 1）。必须 || true 兜住。
+            n=$( { grep -E '(memlat_scmi|rimps_memlat)\.o' "$mf" || true; } | { grep -vc '^[[:space:]]*#' || true; } )
+            [ -n "$n" ] || n=0
             ML_LEFT=$((ML_LEFT+n))
           done
           if [ "$ML_LEFT" -gt 0 ]; then
@@ -987,8 +990,8 @@ jobs:
           grep -q 'KSU_FEATURE_SELINUX_HIDE = 4,' include/uapi/feature.h
           grep -q 'include $(src)/tools/kernel_compat.mk' "$MK"
           echo "  selinux_hide.c = $(wc -c <feature/selinux_hide.c) 字节"
-          echo "  它的 5.10 版本分支数 = $(grep -c 'KERNEL_VERSION(5, 10, 0)' feature/selinux_hide.c)"
-          echo "  它用 selinux_state.ss 的次数 = $(grep -c 'selinux_state.ss' feature/selinux_hide.c)"
+          echo "  它的 5.10 版本分支数 = $( { grep -c 'KERNEL_VERSION(5, 10, 0)' feature/selinux_hide.c || true; } )"
+          echo "  它用 selinux_state.ss 的次数 = $( { grep -c 'selinux_state.ss' feature/selinux_hide.c || true; } )"
           echo "::notice title=SELinux hide 移植（第 1 轮）::ReSukiSU @ $RS_SHA 的实现 + compat.mk 已就位，4 处 >=5.10 守卫已放开。这一轮先看能不能编过，报错我会按注解逐条修。"
       - name: SELinux hide 补齐 backup_policydb / backup_sidtab（第 2 轮）
         if: ${{ inputs.enable_ksu && inputs.keep_selinux_hide }}
@@ -2180,7 +2183,7 @@ jobs:
               fi
               if ! grep -qE '^CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config; then
                 echo "::error title=性能修正::DEFAULT_TCP_CONG 不是 bbr（choice 没生效）"
-                echo "  当前值: $(grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config)"
+                echo "  当前值: $( { grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config || true; } )"
                 echo "  DEFAULT_BBR   = $(./scripts/config --file out/.config --state DEFAULT_BBR)"
                 echo "  DEFAULT_CUBIC = $(./scripts/config --file out/.config --state DEFAULT_CUBIC)"
                 exit 1
