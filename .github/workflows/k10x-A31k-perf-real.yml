@@ -1484,6 +1484,48 @@ jobs:
             fi
           else
             echo "===== 配置来源：$DEFCONFIG ====="
+
+            # ============================================================
+            # ★第 29 轮 · 根治「卡二屏」★ —— 消除 CRLF，掐掉 Restart config
+            # ------------------------------------------------------------
+            # 现场证据（run#7 能开机 / run#21 卡二屏）：
+            #              run#7 ✅      run#21 ❌
+            #   CRLF 警告     175           200
+            #   Restart config  1             9     <-- 9 倍
+            #   scs.o           2             0     <-- 丢了
+            #   cfi.o           1             0     <-- 丢了
+            #   "SHADOW_CALL_STACK) [N/y/?] (NEW)" 被问: 0 次 / 1 次
+            #
+            # 卡二屏机理：
+            #   Restart config 时 Kconfig 要交互提问，而 stdin=/dev/null，于是
+            #     Clang Shadow Call Stack (SHADOW_CALL_STACK) [N/y/?] (NEW)
+            #     Error in reading or end of file.        -> 取默认 N
+            #     Link-Time Optimization (LTO)
+            #     > 1. None (LTO_NONE)                     -> 取默认 1
+            #   而 arch/Kconfig 里：
+            #     CFI_CLANG  depends on LTO_CLANG && KALLSYMS
+            #     LTO_CLANG  depends on CC_IS_CLANG && CLANG_VERSION>=100000 && LD_IS_LLD
+            #   于是 SCS / CFI / LTO 连锁失效 -> scs.o / cfi.o 根本没编。
+            #   原厂 /vendor/lib/modules/*.ko 是按 SCS+CFI 编的，加载不上 -> 卡二屏。
+            #
+            # Restart 的触发源：OPPO 给的 7 个 Kconfig 文件是 CRLF 行尾，
+            #   报 200 行 "warning: ignoring unsupported character"，
+            #   把这个 \r 去掉就不会再 Restart。
+            #   （run#7 只 Restart 1 次所以侥幸没丢 SCS/CFI；
+            #     run#21 因为我多跑了几次 olddefconfig，放大成 9 次，就丢了。）
+            # ============================================================
+            echo "===== 第 29 轮：清理 Kconfig 的 CRLF 行尾（掐掉 Restart config）====="
+            CRLF_FIXED=0
+            while IFS= read -r kf; do
+              if grep -qU $'\r' "$kf" 2>/dev/null; then
+                sed -i 's/\r$//' "$kf"
+                echo "  去 CR: ${kf#$BUILD_DIR/}"
+                CRLF_FIXED=$((CRLF_FIXED+1))
+              fi
+            done < <(find . -name 'Kconfig*' -type f -not -path './out/*' 2>/dev/null)
+            echo "  共修 $CRLF_FIXED 个 Kconfig 文件的 CRLF"
+            echo "  剩余含 CR 的 Kconfig：$( { find . -name 'Kconfig*' -type f -not -path './out/*' -exec grep -lU $'\r' {} + 2>/dev/null || true; } | wc -l )"
+
             cp "$DEFCONFIG" out/.config
             # ------------------------------------------------------------
             # ★第 23 轮：这里【必须先 olddefconfig 一次】★
@@ -2074,8 +2116,57 @@ jobs:
             grep -an 'ARCH_QCOM\|Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null | head -12 || true
             exit 1
           fi
-          echo "  OK 12 个平台符号全部 =y（GPU/SCM/iommu/时钟/中断控制器都在）"
+          echo "  OK 12 个平台符号全部 =y（GPU/SCM/iommu/时钟、中断控制器都在）"
           echo "  ★确认：CONFIG_ARCH_QCOM=y ⇒ kgsl/qcom_scm/ARM_SMMU 等 541 个高通 .o 会正常编译★"
+          echo
+
+          # ============================================================
+          # ★第 29 轮 · 第三层防线：SCS / CFI / LTO 安全插桩★
+          # ------------------------------------------------------------
+          # 这三个是【卡二屏】的直接原因，而且它们最容易在 Restart config
+          # 时被静默重置（默认分别是 N / N / LTO_NONE）。
+          # 原厂 /vendor/lib/modules/*.ko 是按 SCS+CFI 编译的，内核必须一致，
+          # 否则模块加载失败 -> 卡二屏。
+          # run#7（能开机）scs.o=2 cfi.o=1；run#21（卡二屏）scs.o=0 cfi.o=0。
+          # 这里在编译前【强制写回】并硬断言。
+          # ============================================================
+          echo "===== 第 29 轮：SCS / CFI / LTO 安全插桩（防卡二屏）====="
+          echo "  修改前："
+          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LD_IS_LLD|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|CFI_CLANG_SHADOW|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
+
+          # LTO 是个 choice，必须显式选中 LTO_CLANG 而不是 LTO_NONE
+          ./scripts/config --file out/.config --enable  LTO
+          ./scripts/config --file out/.config --enable  LTO_CLANG
+          ./scripts/config --file out/.config --enable  THINLTO
+          ./scripts/config --file out/.config --disable LTO_NONE
+          ./scripts/config --file out/.config --enable  CFI_CLANG
+          ./scripts/config --file out/.config --enable  CFI_CLANG_SHADOW
+          ./scripts/config --file out/.config --enable  SHADOW_CALL_STACK
+          ./scripts/config --file out/.config --enable  SHADOW_CALL_STACK_VMAP 2>/dev/null || true
+          ./scripts/config --file out/.config --enable  KALLSYMS
+          # 这几项会破坏 SCS/CFI 的前提，必须保持关闭
+          ./scripts/config --file out/.config --disable CFI_PERMISSIVE 2>/dev/null || true
+          ./scripts/config --file out/.config --disable GCOV_KERNEL    2>/dev/null || true
+
+          echo "  修改后："
+          grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LD_IS_LLD|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|CFI_CLANG_SHADOW|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
+
+          SCS_MISSING=""
+          for k in CC_IS_CLANG LTO LTO_CLANG CFI_CLANG SHADOW_CALL_STACK KALLSYMS; do
+            grep -qE "^CONFIG_${k}=y" out/.config || SCS_MISSING="$SCS_MISSING $k"
+          done
+          if grep -qE '^CONFIG_LTO_NONE=y' out/.config; then
+            SCS_MISSING="$SCS_MISSING LTO_NONE(应为n)"
+          fi
+          if [ -n "$SCS_MISSING" ]; then
+            echo "::error title=卡二屏::这些插桩项不是 y：$SCS_MISSING"
+            echo "  ⇒ 原厂 /vendor/lib/modules/*.ko 按 SCS+CFI 编译，内核缺了它们会加载失败 -> 卡二屏。"
+            echo "  --- 查日志里 Restart config 的次数 ---"
+            grep -c 'Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null || true
+            exit 1
+          fi
+          echo "  OK SCS + CFI + LTO 全部就位（这次不会卡二屏）"
+          echo "  ★编译产物里应能看到 arch/arm64/kernel/scs.o 和 kernel/cfi.o★"
           echo
 
           echo "===== Droidspaces / NoMount 最终生效值（olddefconfig 之后）====="
