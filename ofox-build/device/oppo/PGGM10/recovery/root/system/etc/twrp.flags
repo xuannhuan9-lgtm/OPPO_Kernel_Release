@@ -1,0 +1,49 @@
+# TWRP / OrangeFox 运行时 flag
+#
+# 本文件决定 recovery 里「哪些分区可备份/可刷写/可挂载」。
+# 依据：probe.txt 的实际分区表 —— 本机【没有 recovery 分区】，
+#       所以这里绝对不能出现 /recovery。
+#
+# 语法：  <挂载点>  <flag>  <值>
+#   backup=1      → 可备份
+#   wipe=1        → 可格式化
+#   display=...   → UI 里显示的名字
+#   settings=...  → 界面里出现的开关
+#   removable      可移动介质
+#   storage        被当作存储设备（USB 挂载用）
+#
+
+# ---- boot：★双模式 boot 就住在这里★ ----
+#   平时=Android，adb reboot recovery=橙狐。
+#   允许备份（刷坏了能救回来），也允许刷写。
+/boot         flags=backup=1;flashimg=1;display="Boot"
+
+# ---- vendor_boot：合并失败时可能需要它，允许备份 ----
+/vendor_boot  flags=backup=1;flashimg=1;display="Vendor Boot"
+
+# ---- dtbo ----
+/dtbo         flags=backup=1;flashimg=1;display="DTBO"
+
+# ---- data：可备份可格式化（★格式化会清空，且 FBE 下可能挂不上★）----
+/data         flags=backup=1;wipe=1;display="Data"
+/data         flags=settingsstorage=1;fsflags="inlinecrypt"
+
+# ---- metadata：FBE 元数据，允许备份（★别格式化★，抹了就再也读不回 /data）----
+/metadata     flags=backup=1;display="Metadata"
+
+# ---- cache：实际是 oplusreserve2 ----
+/cache        flags=backup=1;wipe=1;display="Cache"
+
+# ---- persist：指纹/传感器校准，★只备份，禁止格式化和刷写★ ----
+/persist      flags=backup=1;display="Persist"
+
+# ---- misc：BCB，adb reboot recovery 的通道 ----
+/misc         flags=backup=1;flashimg=1;display="Misc"
+
+# ---- 存储 ----
+/external_sd  flags=display="MicroSD";storage;wipeingui;removable
+/usb_otg      flags=display="USB OTG";storage;wipeingui;removable
+
+# ---- 内部存储（RECOVERY_SDCARD_ON_DATA := true，即挂在 /data 上）----
+#    ★FBE 解不开时这里会挂不上★，属预期
+/sdcard       flags=display="Internal Storage";storage;wipeingui;fsflags="inlinecrypt"
