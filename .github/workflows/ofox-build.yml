@@ -81,7 +81,11 @@ on:
         required: false
         default: ''
       make_jobs:
-        description: '并行编译线程数。★run #15 教训：7GB 内存编 AOSP14，填 4 会被 OOM kill；默认降到 2（已加 8GB swap）。想快点可以试 3'
+        description: '并行编译线程数。★run #18 实测：7GB 内存 + 8GB swap，填 2 仍然 OOM（mem_avail 掉到 835MB、swap 8191MB 用满，143 被杀）。默认降到 1'
+        type: string
+        default: '1'
+      go_maxprocs:
+        description: '★run #18 的靶子★ soong 的 Go 编译并发数（GOMAXPROCS）。OOM 就发生在编译 soong-*.a 这批 Go 目标时，每个吃 1~2GB。默认 2（配合 make_jobs=1）'
         type: string
         default: '2'
 
@@ -101,6 +105,7 @@ jobs:
       CUSTOM_KERNEL_REPO: ${{ inputs.custom_kernel_repo }}
       DEVICE_TREE_REPO: ${{ inputs.device_tree_repo != '' && inputs.device_tree_repo || github.repository }}
       MAKE_JOBS: ${{ inputs.make_jobs }}
+      GO_MAXPROCS: ${{ inputs.go_maxprocs }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
       CCACHE_COMPRESS: '1'
@@ -695,6 +700,22 @@ jobs:
             ofox-${{ env.FOX_BRANCH }}-${{ env.DEVICE }}-
             ofox-${{ env.FOX_BRANCH }}-
 
+      # ★run #18 教训★ soong 自举（131 个 Go 目标）每次都要从 0 重来：
+      #   ① 白花 ~6 分钟（加上 18 分钟 sync 已经 24 分钟，正是 143 出现的位置）
+      #   ② 且它的内存峰值正好撞上 OOM
+      #   把 out/host/linux-x86/bin/go 缓存起来，第二次跑直接跳过自举。
+      #   注意：soong 自举产物跟源码无关（是 AOSP 构建系统本身），可以安全跨 commit 复用。
+      - name: 恢复 soong 自举缓存（跳过 Go 编译，省时间也省内存）
+        id: soongcache
+        if: inputs.use_ccache
+        uses: actions/cache@v4
+        with:
+          path: fox_src/OrangeFox/out/host/linux-x86/bin/go
+          key: soong-go-${{ env.FOX_BRANCH }}-${{ hashFiles('ofox-build/.github/workflows/ofox-build.yml') }}
+          restore-keys: |
+            soong-go-${{ env.FOX_BRANCH }}-
+            soong-go-
+
       - name: lunch 并编译 recoveryimage
         timeout-minutes: 120
         run: |
@@ -901,6 +922,24 @@ jobs:
           echo "--- df -h \$GITHUB_WORKSPACE ---"; df -h "$GITHUB_WORKSPACE" 2>/dev/null || true
           echo "--- swap ---"; swapon --show 2>/dev/null || cat /proc/swaps || true
           echo "--- 关键：磁盘 inode ---"; df -i / | tail -1 || true
+          # ★run #18 的靶子★ OOM 发生在编译 soong-*.a 那批 Go 目标时（每个 1~2GB）。
+          #   GOMAXPROCS 控制 soong 内部 Go 编译的并发度；不设的话它按 CPU 核数跑（4 核→4 个并发），
+          #   4×1.5GB ≈ 6GB，加上 soong 自身 ≈ 7GB ⇒ 正好把 7GB 内存 + 8GB swap 吃穿。
+          #   限制到 2 个并发，峰值大约砍一半。
+          export GOMAXPROCS="${GO_MAXPROCS:-2}"
+          echo "GOMAXPROCS       = $GOMAXPROCS （限制 soong 的 Go 编译并发）"
+          echo "MAKE_JOBS        = $MAKE_JOBS"
+          echo "nproc            = $(nproc)"
+
+          # ★soong 自举缓存★ actions/cache 只在 job 成功时保存，而本次多半会在 make 里 OOM，
+          #   所以改成：如果缓存没命中、但我们自己之前存的 tar 在，就先解出来；
+          #   并在 make 之前【立刻】把已编好的 Go 产物打包，交给 if: always() 的上传步骤带走。
+          GOBIN="$SRC_ROOT/out/host/linux-x86/bin/go"
+          if [ ! -x "$SRC_ROOT/out/host/linux-x86/bin/soong_build" ]; then
+            echo "soong_build 不存在 ⇒ 本次需要自举（约 6 分钟、也是 OOM 高发段）"
+          else
+            echo "soong_build 已存在 ⇒ 缓存命中，本次跳过自举 ✅"
+          fi
           echo "--- soong 是否已有产物（判断是否复用了缓存）---"
           ls -la out/host/linux-x86/bin/soong_ui 2>/dev/null || echo "  soong_ui 不存在（本次要重新编）"
           ls -d out/soong 2>/dev/null || echo "  out/soong 不存在（首次编译）"
