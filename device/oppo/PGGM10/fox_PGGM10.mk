@@ -14,8 +14,12 @@
 #   原来这里用了 aosp_base.mk + emulated_storage.mk —— 精简 manifest 里
 #   不一定有 emulated_storage.mk，inherit 不存在的文件会让【整个产品解析失败】，
 #   表现就是 lunch 列表里没有任何 fox_PGGM10-*。所以逐个做存在性检查。
+# NOTE: no $(info)/$(warning) anywhere in this file. AOSP 14 walks product
+# makefiles through PRODUCT_RELEASE_CONFIG_MAPS and a parse-time print breaks
+# product registration ("Failed to parse make line"), which makes lunch show
+# no fox_PGGM10-* combo at all.
 ifeq ($(wildcard $(SRC_TARGET_DIR)/product/core_64_bit.mk),)
-  $(error [PGGM10] 找不到 $(SRC_TARGET_DIR)/product/core_64_bit.mk，源码树不完整)
+  $(error core_64_bit.mk missing from source tree)
 endif
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 
@@ -25,10 +29,8 @@ else ifneq ($(wildcard $(SRC_TARGET_DIR)/product/aosp_base.mk),)
   $(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
 endif
 
-$(info [fox_PGGM10] 开始继承 device/oppo/PGGM10/device.mk)
 # 继承本设备
 $(call inherit-product, device/oppo/PGGM10/device.mk)
-$(info [fox_PGGM10] device.mk 继承完成)
 
 # ===========================================================================
 # 继承 recovery 公共配置
@@ -56,7 +58,6 @@ ifeq ($(wildcard vendor/fox/config/common.mk),)
   ifeq ($(wildcard vendor/twrp/config/common.mk),)
     ifeq ($(wildcard vendor/pb/config/common.mk),)
       # ---- D) 内置最小兜底 ----
-      $(info [fox_PGGM10] vendor/{fox,twrp,pb} 的 common.mk 都不存在，启用内置最小配置)
 
       PRODUCT_PACKAGES += \
           recovery \
@@ -69,17 +70,14 @@ ifeq ($(wildcard vendor/fox/config/common.mk),)
           ro.recovery.version=builtin-fallback
     else
       # ---- C) PitchBlack Recovery ----
-      $(info [fox_PGGM10] 使用 vendor/pb/config/common.mk (PitchBlack))
       $(call inherit-product, vendor/pb/config/common.mk)
     endif
   else
     # ---- B) minimal-manifest-twrp ----
-    $(info [fox_PGGM10] 使用 vendor/twrp/config/common.mk)
     $(call inherit-product, vendor/twrp/config/common.mk)
   endif
 else
   # ---- A) 橙狐完整源 ----
-  $(info [fox_PGGM10] 使用 vendor/fox/config/common.mk)
   $(call inherit-product, vendor/fox/config/common.mk)
 endif
 
