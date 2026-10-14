@@ -1518,8 +1518,38 @@ jobs:
             #       强开之后第 1874 行还会再跑一次 olddefconfig 收尾。
             # ------------------------------------------------------------
             echo "===== 强开之前先 olddefconfig（保证 .config 与 Kconfig 自洽）====="
-            make -j"$(nproc)" O=out olddefconfig >/dev/null 2>&1 \
-              || { echo "::error title=配置::预 olddefconfig 失败"; exit 1; }
+            echo "  拷入后行数=$(wc -l < out/.config)  ARCH_QCOM(拷入时)=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★本来就没有★'; } )"
+            # ★不要吞输出★ run#16 就是因为 >/dev/null 2>&1 把 Kconfig 的
+            #   "Restart config / Error in reading / unmet dependencies"
+            #   全吞了，导致查不出 ARCH_QCOM 为什么消失。这次全打出来。
+            set +e
+            make -j"$(nproc)" O=out olddefconfig > "$RUNNER_TEMP/preolddef.log" 2>&1
+            PRE_RC=$?
+            set -e
+            echo "  olddefconfig 返回码=$PRE_RC"
+            echo "  ---- Kconfig 关键告警（若有）----"
+            grep -nE 'Restart config|Error in reading|unmet direct dep|warning:.*Kconfig|unsupported character|new symbol' \
+              "$RUNNER_TEMP/preolddef.log" 2>/dev/null | head -25 || true
+            echo "  ---- 有没有问 ARCH_QCOM（NEW）----"
+            grep -n 'ARCH_QCOM' "$RUNNER_TEMP/preolddef.log" 2>/dev/null | head -5 || true
+            echo "  ---- 日志里有几个 (NEW) ----"
+            grep -c '(NEW)' "$RUNNER_TEMP/preolddef.log" 2>/dev/null || true
+            echo "  ---- source 链检查：Kconfig 是否认到 Kconfig.platforms ----"
+            echo "    arch/arm64/Kconfig 里 source Kconfig.platforms 的行："
+            grep -n 'Kconfig.platforms' arch/arm64/Kconfig 2>/dev/null || echo "      ★没有这一行★"
+            echo "    arch/arm64/Kconfig.platforms 是否存在："
+            ls -la arch/arm64/Kconfig.platforms 2>/dev/null || echo "      ★文件不存在★"
+            echo "    Kconfig.platforms 里 config ARCH_QCOM 的行："
+            grep -n 'config ARCH_QCOM' arch/arm64/Kconfig.platforms 2>/dev/null || echo "      ★没有★"
+            echo "  ---- 用 kconfiglib 直接问 Kconfig 认不认 ARCH_QCOM ----"
+            if [ -f scripts/kconfig/merge_config.sh ]; then
+              echo "    (scripts/kconfig 存在)"
+            fi
+            if [ "$PRE_RC" -ne 0 ]; then
+              echo "::error title=配置::预 olddefconfig 失败 rc=$PRE_RC"
+              tail -40 "$RUNNER_TEMP/preolddef.log" || true
+              exit 1
+            fi
             echo "  行数=$(wc -l < out/.config)  ARCH_QCOM=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★缺失★'; } )"
             # ★硬断言：平台符号必须在强开之前就立住★
             for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS NET; do
