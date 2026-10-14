@@ -861,22 +861,52 @@ jobs:
           #   所以：① 采样内存+磁盘；② make 输出【同时】打到 job log（tee），
           #   这样即使 artifact 传不上来，job log 里也有。
           set +e
-          : > /tmp/reswatch.log
+          # ★run #15/#16/#17 的教训★ 采样【必须直接打到 job log】，不能只写文件：
+          #   143 之后 step 立刻结束，"tail /tmp/reswatch.log" 那行永远执行不到，
+          #   结果三次 run 里一句采样都没有，白采样。
+          #   所以这里：① 直接 echo 到 stdout 进 job log；② 同时追加 /tmp/rsw.txt 供自动判定。
+          : > /tmp/rsw.txt
           (
             n=0
-            while [ $n -lt 300 ]; do
+            while [ $n -lt 600 ]; do
               n=$((n+1))
               sleep 10
               MEM=$(free -m | awk '/^Mem:/{print $7}')
               SWP=$(free -m | awk '/^Swap:/{print $3}')
               DSK=$(df -m / | awk 'NR==2{print $4}')
               LOD=$(cut -d' ' -f1 /proc/loadavg)
-              printf '[%s] mem_avail=%sMB swap_used=%sMB disk_avail=%sMB load=%s\n' \
-                     "$(date +%H:%M:%S)" "$MEM" "$SWP" "$DSK" "$LOD" >> /tmp/reswatch.log
+              NOW=$(date -u +%H:%M:%S)
+              RSW=$(cat /proc/swaps 2>/dev/null | tail -n +2 | wc -l)
+              LINE="RESWATCH[$NOW] mem_avail=${MEM}MB swap_used=${SWP}MB disk_avail=${DSK}MB load=${LOD} swap_devs=${RSW}"
+              echo "$LINE"                                   # ← 进 job log（主要用途）
+              echo "$LINE" >> /tmp/rsw.txt                   # ← 给后面自动判定用
             done
           ) &
           WATCH_PID=$!
 
+          # ★配额调查★ 顺便把 runner 的身份、配额、以及"这是第几次 run"打出来，
+          #   用于判断 143 到底是 OOM、磁盘、还是账户级配额。
+          echo "========== make 前环境快照 =========="
+          echo "date_utc     = $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "runner_name  = ${RUNNER_NAME:-未设置}"
+          echo "runner_os    = ${RUNNER_OS:-未设置}"
+          echo "run_number   = ${GITHUB_RUN_NUMBER:-未设置}"
+          echo "run_attempt  = ${GITHUB_RUN_ATTEMPT:-未设置}"
+          echo "workflow     = ${GITHUB_WORKFLOW:-未设置}"
+          echo "actor        = ${GITHUB_ACTOR:-未设置}"
+          echo "job          = ${GITHUB_JOB:-未设置}"
+          echo "runner_track = ${RUNNER_TRACKING_ID:-未设置}"
+          echo "--- free -m ---"; free -m || true
+          echo "--- df -h / ---"; df -h / || true
+          echo "--- df -h \$GITHUB_WORKSPACE ---"; df -h "$GITHUB_WORKSPACE" 2>/dev/null || true
+          echo "--- swap ---"; swapon --show 2>/dev/null || cat /proc/swaps || true
+          echo "--- 关键：磁盘 inode ---"; df -i / | tail -1 || true
+          echo "--- soong 是否已有产物（判断是否复用了缓存）---"
+          ls -la out/host/linux-x86/bin/soong_ui 2>/dev/null || echo "  soong_ui 不存在（本次要重新编）"
+          ls -d out/soong 2>/dev/null || echo "  out/soong 不存在（首次编译）"
+          echo "--- 当前编译缓存 ccache ---"; ccache -s 2>/dev/null | head -8 || echo "  ccache 不可用"
+          echo "====================================="
+          echo "::group::make 运行中（采样每 10 秒一行 RESWATCH）"
           # make 输出同时进 build.log 和 job log（tee），并用行缓冲
           make -j"$MAKE_JOBS" recoveryimage 2>&1 | tee "$LOG"
           RC=${PIPESTATUS[0]}
@@ -884,13 +914,43 @@ jobs:
           sleep 1
           set -e
 
-          echo "===== 资源采样（make 期间，每 10 秒）====="
-          tail -50 /tmp/reswatch.log 2>/dev/null || echo "(无采样)"
           echo "===== make 退出码 = $RC ====="
           if [ "$RC" = "143" ]; then
             echo "::error::★make 被 SIGTERM(143) 终止★"
-            echo "::error::看上面采样：mem_avail 接近 0 ⇒ OOM；disk_avail 接近 0 ⇒ 磁盘满"
-            echo "::error::注意 143 之后 runner 会 shutdown，artifact 传不上来 ⇒ 日志只能靠 job log"
+            echo "::error::当前时间 = $(date -u +%Y-%m-%dT%H:%M:%SZ) —— 与上面「make 前环境快照」的 date_utc 相减即总耗时"
+            echo "::error::【判定方法】往上翻 RESWATCH 行（每 10 秒一行），看被杀前的最后几行："
+            echo "::error::  · mem_avail 掉到几百 MB 甚至 0   ⇒ 内存不足（OOM）"
+            echo "::error::  · disk_avail 掉到几 GB 甚至 0 ⇒ 磁盘不足"
+            echo "::error::  · 两者都还宽裕（mem 还有几 GB、disk 还有几十 GB）"
+            echo "::error::    ⇒ 【不是本机资源问题】，是 runner 被平台回收："
+            echo "::error::       账户 Actions 配额 / fork 仓库限制 / 平台单次时长上限。"
+            echo "::error::       这种情况加 swap、降 -j 一律无效，只能换跑法。"
+          fi
+          # ★自动判定★ 不靠人肉看数字：直接从采样里算趋势
+          if [ "$RC" = "143" ]; then
+            echo "===== 自动资源判定 ====="
+            echo "$RESWATCH_ALL" >/dev/null 2>&1 || true
+            # 从 job log 里抓不到自己，所以改用构建期变量：把最后几个采样留在文件里
+            # （采样同时写文件仅用于这里的判定，失败也不影响日志）
+            if [ -f /tmp/rsw.txt ]; then
+              LAST=$(tail -6 /tmp/rsw.txt)
+              echo "最后 6 条采样："
+              echo "$LAST" | while IFS= read -r L; do echo "  $L"; done
+              MMIN=$(tail -6 /tmp/rsw.txt | grep -oE 'mem_avail=[0-9]+' | cut -d= -f2 | sort -n | head -1)
+              DMIN=$(tail -6 /tmp/rsw.txt | grep -oE 'disk_avail=[0-9]+' | cut -d= -f2 | sort -n | head -1)
+              echo "  采样最低 mem_avail = ${MMIN:-?} MB"
+              echo "  采样最低 disk_avail = ${DMIN:-?} MB"
+              if [ -n "$MMIN" ] && [ "$MMIN" -lt 400 ] 2>/dev/null; then
+                echo "::error::自动判定 = 内存不足（mem_avail 最低 ${MMIN}MB < 400MB）"
+              elif [ -n "$DMIN" ] && [ "$DMIN" -lt 3000 ] 2>/dev/null; then
+                echo "::error::自动判定 = 磁盘不足（disk_avail 最低 ${DMIN}MB < 3GB）"
+              else
+                echo "::warning::自动判定 = 【非本机资源问题】。mem 最低 ${MMIN:-?}MB、disk 最低 ${DMIN:-?}MB 都还宽裕，"
+                echo "::warning::⇒ runner 被平台回收（配额 / fork 限制 / 平台时长上限）。加 swap 和降 -j 无效。"
+              fi
+            else
+              echo "  (/tmp/rsw.txt 不存在，只能靠上面的 RESWATCH 行肉眼判断)"
+            fi
           fi
           echo "===== build.log 尾部 60 行 ====="
           tail -60 "$LOG"
