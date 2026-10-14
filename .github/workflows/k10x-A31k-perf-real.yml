@@ -1528,9 +1528,26 @@ jobs:
             #       => 所有 arm64 符号(含 ARCH_QCOM)全被当成未知符号删掉。
             #       (第 1991 行那个 export ARCH=arm64 在【本步骤之后】，救不了这里)
             # 修法：本步骤开头就 export，并且每条 make 都显式带 ARCH=arm64。
+            # ★第 27 轮补全★
+            # run#19 的 diff 又暴露一层：
+            #   < # Compiler: Android clang version 11.0.2      (defconfig 期望 Clang)
+            #   > # Compiler: aarch64-buildroot-linux-gnu-gcc   9.3.0   (实际用了 GCC!)
+            #   < CONFIG_CC_IS_CLANG=y   > CONFIG_CC_IS_GCC=y
+            #   < CONFIG_LTO_CLANG=y     > CONFIG_LTO_NONE=y
+            #   < CONFIG_CFI_CLANG=y     > (没了)
+            #   < CONFIG_SHADOW_CALL_STACK=y > (没了)
+            # 因为 defconfig 里 LTO/CFI/CC_IS_CLANG 这些符号是【按编译器探测结果】算出来的。
+            # 只给 ARCH 不给 CC=clang，探测出 GCC => 这些符号全失效 =>
+            # Kconfig 报 unmet => Restart config => ARCH_QCOM 被重置成 N。
+            # 所以这里必须把主步骤那套完整 Clang 环境【提前】摆好。
+            export PATH="$CLANG_DIR/bin:$PATH"
             export ARCH=arm64 SUBARCH=arm64
+            export CC=clang LD=ld.lld LLVM=1
+            export CLANG_TRIPLE=aarch64-linux-gnu-
             export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
             export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
+            echo "  CLANG_DIR=$CLANG_DIR"
+            echo "  which clang: $(command -v clang || echo '★找不到 clang★')"
             echo "===== 强开之前先 olddefconfig（保证 .config 与 Kconfig 自洽）====="
             echo "  ARCH=$ARCH SUBARCH=$SUBARCH（必须都是 arm64，否则会变成 x86 内核）"
             echo "  拷入后行数=$(wc -l < out/.config)  ARCH_QCOM(拷入时)=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★本来就没有★'; } )"
