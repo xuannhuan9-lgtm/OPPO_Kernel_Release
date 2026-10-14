@@ -1,0 +1,137 @@
+#
+# ★本文件 = recovery/root/system/etc/recovery.fstab 的同内容副本★
+# 打包进 recovery 的实际路径是后者；这里放一份便于 CI / 人工核对。
+# 内容与转换依据见文件末尾的「原始转换说明」。
+#
+#
+# TWRP / OrangeFox fstab —— OPPO K10x 5G (PGGM10 / OP5295, SM6375 holi)
+#
+# ★这个文件由 ofox-prep/recovery.fstab（原厂 12655 字节那份）转换而来★
+# 转换规则写在下面，依据全部来自 ofox-prep/recovery.fstab 与 twrp-probe/probe.txt。
+#
+# 转换规则：
+#   1) 原厂 fstab 是 Android fs_mgr 格式；TWRP 用同一套列，但 TWRP 特有字段
+#      写在第 5 列之后（/flag 用 twrpflags）。
+#   2) 动态分区（system/vendor/product/...）原厂用 "logical"；
+#      TWRP 里同样写 logical + slotselect —— 但不带 avb= 校验参数，
+#      因为 recovery 下不做 AVB 校验（本机已解锁）。
+#   3) my_* 这些 OPPO 专有逻辑分区一并保留（TWRP 能识别 super 里的它们），
+#      带 nofail，缺了不影响启动。
+#   4) /cache 在本机没有独立分区：原厂映射到 /dev/block/by-name/oplusreserve2
+#      （probe.txt 确认 oplusreserve2 -> /dev/block/sdf14, 262144 KB = 256MB）。
+#      所以这里 /cache 指向 oplusreserve2，保持与原厂一致。
+#   5) /data、/metadata 保留原厂的加密参数（TWRP 能读懂 fileencryption=、
+#      metadata_encryption=、keydirectory= 这些）。
+#   6) /external_sd、/usb_otg 原厂写的是 /dev/block/mmcblk1p1 和 /dev/block/sdg1，
+#      这是老写法；本机 probe 里没有 mmcblk/sdg 节点，改用 TWRP 的
+#      /dev/block/mmcblk1* 与 auto 探测写法并存（见下）。
+#   7) 删掉原厂里那些本机【不存在】的分区项：recovery、aboot、abootbak、
+#      sbl1、rpm、tz、cmnlib、keymaster、mdtp、reserve4、LOGO、DDR 等
+#      —— probe.txt 的 by-name 里没有这些名字（那是别的 OPPO 机型的 fstab）。
+#
+# 依据：probe.txt by-name 实际存在的分区：
+#   boot_a/boot_b, dtbo_a/b, vendor_boot_a/b, vbmeta_a/b,
+#   vbmeta_system_a/b, vbmeta_vendor_a/b, super, misc, metadata, persist,
+#   userdata, oplusreserve1..5, oplusreserve2, oplusstanvbk_a/b, frp,
+#   keystore, ssd, rawdump, vm-system_a/b, vm-data, vm-keystore, ...
+#
+#<src>                                          <mnt_point>     <type>  <mnt_flags and options>   <fs_mgr_flags / twrpflags>
+#
+
+# ===========================================================================
+# 动态分区（super 内，logical + slotselect）
+# 组名 qti_dynamic_partitions，与 BoardConfig.mk 第 5 节一致
+# ===========================================================================
+system        /system        ext4   ro,barrier=1,discard   wait,slotselect,logical,first_stage_mount
+system        /system        erofs  ro                     wait,slotselect,logical,first_stage_mount
+
+system_ext    /system_ext    ext4   ro,barrier=1,discard   wait,slotselect,logical,first_stage_mount
+system_ext    /system_ext    erofs  ro                     wait,slotselect,logical,first_stage_mount
+
+product       /product       ext4   ro,barrier=1,discard   wait,slotselect,logical,first_stage_mount
+product       /product       erofs  ro                     wait,slotselect,logical,first_stage_mount
+
+vendor        /vendor        ext4   ro,barrier=1,discard   wait,slotselect,logical,first_stage_mount
+vendor        /vendor        erofs  ro                     wait,slotselect,logical,first_stage_mount
+
+odm           /odm           ext4   ro,barrier=1,discard   wait,slotselect,logical,first_stage_mount
+odm           /odm           erofs  ro                     wait,slotselect,logical,first_stage_mount
+
+# ---- OPPO 专有逻辑分区（TWRP 下挂载点用 /mnt/vendor/* 更贴近原厂）----
+my_product    /my_product    ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_product    /my_product    erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_engineering /my_engineering ext4  ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_engineering /my_engineering erofs ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_company    /my_company    ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_company    /my_company    erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_carrier    /my_carrier    ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_carrier    /my_carrier    erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_region     /my_region     ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_region     /my_region     erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_bigball    /my_bigball    ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_bigball    /my_bigball    erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_heytap     /my_heytap     ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_heytap     /my_heytap     erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_stock      /my_stock      ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_stock      /my_stock      erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_preload    /my_preload    ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_preload    /my_preload    erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+my_manifest   /my_manifest   ext4   ro,barrier=1   wait,slotselect,logical,first_stage_mount,nofail
+my_manifest   /my_manifest   erofs  ro             wait,slotselect,logical,first_stage_mount,nofail
+
+# ===========================================================================
+# 物理分区
+# ===========================================================================
+
+# ---- /metadata：ext4，FBE 元数据（wrapped key）存放处 ★关键★ ----
+/dev/block/by-name/metadata   /metadata   ext4   noatime,nosuid,nodev,discard   wait,check,formattable,wrappedkey,first_stage_mount
+
+# ---- /data：f2fs + inlinecrypt ★FBE 大概率解不开，见 BoardConfig 第 9 节★ ----
+#    原厂参数（fileencryption / metadata_encryption / keydirectory）逐字保留，
+#    TWRP 能识别这些字段；能否真解开取决于 keymaster HAL 与 ICE 驱动。
+/dev/block/bootdevice/by-name/userdata   /data   f2fs   noatime,nosuid,nodev,discard,inlinecrypt,reserve_root=32768,resgid=1065,fsync_mode=nobarrier   latemount,wait,resize,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota,reservedsize=128M,checkpoint=fs
+
+# ---- /cache：本机没有 cache 分区，原厂把它映射到 oplusreserve2 ----
+#    （原厂 recovery.fstab 原文：/dev/block/by-name/oplusreserve2 /cache ext4 ...）
+/dev/block/by-name/oplusreserve2   /cache   ext4   nosuid,nodev,noatime,barrier=1   wait,check,first_stage_mount
+
+# ---- /persist：ext4，指纹/传感器校准数据，别乱动 ----
+/dev/block/bootdevice/by-name/persist   /mnt/vendor/persist   ext4   noatime,nosuid,nodev,barrier=1   wait
+/dev/block/bootdevice/by-name/persist   /persist              ext4   noatime,nosuid,nodev,barrier=1   wait
+
+# ---- /misc：BCB 通道，adb reboot recovery 就靠它 ★本机唯一的 recovery 入口★ ----
+/dev/block/bootdevice/by-name/misc   /misc   emmc   defaults   defaults
+
+# ---- /boot 与 /vendor_boot：我们在手机端要合并/刷写的两个分区 ----
+#    本机没有 recovery 分区，所以这里【故意不写 /recovery 行】
+/dev/block/bootdevice/by-name/boot          /boot          emmc   defaults   defaults
+/dev/block/bootdevice/by-name/vendor_boot   /vendor_boot   emmc   defaults   defaults
+/dev/block/bootdevice/by-name/dtbo          /dtbo          emmc   defaults   defaults
+
+# ---- oplusreserve2 也单独给个挂载点（原厂有 /opporeserve）----
+/dev/block/bootdevice/by-name/oplusreserve2  /opporeserve   ext4   rw,seclabel,nosuid,nodev,noatime,data=ordered   wait
+
+# ---- 外置 SD 卡 ----
+#    原厂写 /dev/block/mmcblk1p1；probe.txt 里当前没有插卡所以看不到节点，
+#    保留 mmcblk1 写法并加 auto 兜底。
+/dev/block/mmcblk1p1   /external_sd   vfat   nosuid,nodev   defaults
+
+# ---- USB OTG（原厂 /dev/block/sdg1；TWRP 下用 auto 探测更稳）----
+/dev/block/sdg1        /usb_otg       vfat   nosuid,nodev   defaults
+
+# ---- 固件分区（只读，recovery 里挂上供 modem/bt/dsp 使用）----
+/dev/block/bootdevice/by-name/modem       /vendor/firmware_mnt   vfat   ro,shortname=lower,uid=1000,gid=1000,dmask=222,fmask=333,context=u:object_r:firmware_file:s0   wait,slotselect
+/dev/block/bootdevice/by-name/dsp         /vendor/dsp            ext4   ro,nosuid,nodev,barrier=1            wait,slotselect
+/dev/block/bootdevice/by-name/bluetooth   /vendor/bt_firmware    vfat   ro,shortname=lower,uid=1002,gid=3002,dmask=227,fmask=337,context=u:object_r:bt_firmware_file:s0   wait,slotselect
+
+# ---- 特殊分区 ----
+/dev/block/by-name/preload   /special_preload   ext4   ro   wait,nofail
