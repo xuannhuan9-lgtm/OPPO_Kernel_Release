@@ -1,0 +1,64 @@
+# 从原厂系统抽取的闭源 blob 清单
+#
+# 依据：ofox-prep/boot_a.img 的 ramdisk 实测清单（原厂 recovery 自带这些）
+#       + twrp-probe/probe.txt 的 vendor 库信息
+#
+# 行首 "-" = 从 /vendor 取；否则从 /system 取
+#
+# ⚠ 全部都是「可选」：不解密 /data、不显示电量的话可以不抽。
+#   橙狐不带任何厂商 blob 也能启动到界面。
+
+# ---------------------------------------------------------------------------
+# Qualcomm 解密 / keymaster（★想要解开 FBE 就靠这些，但不保证成功★）
+# ---------------------------------------------------------------------------
+-vendor/lib64/libQSEEComAPI.so
+-vendor/lib64/libkeymasterdeviceutils.so
+-vendor/lib64/libkeymasterprovision.so
+-vendor/lib64/libkeymasterutils.so
+-vendor/lib64/libqtikeymaster4.so
+-vendor/lib64/libGPreqcancel.so
+-vendor/lib64/libGPreqcancel_svc.so
+-vendor/lib64/libSecureUILib.so
+-vendor/lib64/libsecureui.so
+-vendor/lib64/libsecureui_svcsock.so
+-vendor/lib64/librpmb.so
+-vendor/lib64/libssd.so
+-vendor/lib64/libdiag.so
+-vendor/lib64/libtime_genoff.so
+-vendor/lib64/libops.so
+-vendor/lib64/libqisl.so
+-vendor/lib64/libqdutils.so
+-vendor/lib64/libqservice.so
+-vendor/lib64/libqcbor.so
+-vendor/lib64/libStDrvInt.so
+-vendor/lib64/libdrm.so
+-vendor/lib64/libdrmfs.so
+-vendor/lib64/libdrmtime.so
+
+# keymaster / gatekeeper HAL（实现体）
+-vendor/bin/hw/android.hardware.keymaster@4.1-service-qti
+-vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+-vendor/lib64/hw/android.hardware.gatekeeper@1.0-impl-qti.so
+-vendor/lib64/hw/android.hardware.keymaster@4.1-impl-qti.so
+
+# ---------------------------------------------------------------------------
+# qseecomd / 安全世界守护进程（keymaster 依赖它）
+# ---------------------------------------------------------------------------
+-vendor/bin/qseecomd
+
+# ---------------------------------------------------------------------------
+# 原厂 recovery 自带的 OPPO 私有库（在 boot ramdisk 里实测存在）
+# 这些是 OPPO 的 recovery 升级/通信库，橙狐用不上；
+# 但如果想让 OTA 侧载功能完整，可以抽进来。默认注释掉。
+# ---------------------------------------------------------------------------
+#system/lib64/librecovery_updater.so
+#system/lib64/vendor.oplus.hardware.commondcs-V1-ndk_platform.so
+#system/lib64/vendor.oplus.hardware.fido.fido2ca-V1-ndk_platform.so
+#system/lib64/vendor.oplus.hardware.fido.fidoca-V1-ndk_platform.so
+
+# ---------------------------------------------------------------------------
+# 振动 / 快充 / 电量（想让 recovery 里振动与电量显示正常再加）
+# ---------------------------------------------------------------------------
+-vendor/bin/hw/vendor.qti.hardware.vibrator.service
+-vendor/lib64/vendor.qti.hardware.vibrator.impl.so
+-vendor/lib64/libqtivibratoreffect.so
