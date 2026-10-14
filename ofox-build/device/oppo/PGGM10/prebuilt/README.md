@@ -70,11 +70,42 @@ dd if=vendor_boot_a.img of=dtb.img bs=1 skip=724992 count=4607565
 
 ---
 
-## 3. `prebuilt/dtbo.img`（可选，不参与 recovery 打包）
+## 3. `prebuilt/dtbo.img`（★已不参与构建★）
 
-只在 `BOARD_PREBUILT_DTBOIMAGE` 里引用，用于校验。
-来源：`ofox-prep/dtbo_a.img` 的**有效部分**（分区 24MB，实际镜像可能更小）。
-留空也能编过（`BOARD_KERNEL_SEPARATED_DTBO` 已设 true）。
+> ⚠ **2026-10 更新**：`BoardConfig.mk` 已**移除** `BOARD_PREBUILT_DTBOIMAGE`，
+> 并把 `BOARD_KERNEL_SEPARATED_DTBO` 改为 **`false`**。
+> 原因：本机 dtbo 是原厂的、我们不编译也不刷它（`dtbo_a` 保持原样，
+> 刷机只动 `boot` 分区）。所以这个文件**现在完全用不到**，
+> 放在这里只是为了记录出处，**不需要放进 prebuilt/**。
+
+来源（仅存档，不用）：`ofox-prep/dtbo_a.img`（分区 24MB）。
+
+## 4. 关于 dtb / dtbo 的最终结论（重要）
+
+实测本机 **boot 里没有 dtb**：
+
+```
+boot_a.img = header(4096) + kernel(48595008) + ramdisk(21251696)
+vendor_boot_a.img 里才有 dtb（dtb_size = 4607565）
+```
+
+因此 `BoardConfig.mk` 里：
+- `BOARD_INCLUDE_DTB_IN_BOOTIMG := false` —— boot 不含 dtb
+- **不设** `BOARD_PREBUILT_DTBIMAGE_DIR` / `TARGET_PREBUILT_DTB` / `BOARD_PREBUILT_DTBOIMAGE`
+  （设了会直接 `$(error)`：*BOARD_PREBUILT_DTBIMAGE_DIR with
+  'BOARD_INCLUDE_DTB_IN_BOOTIMG != true' is not supported*）
+- `BOARD_KERNEL_SEPARATED_DTBO := false`
+
+最终镜像由 `ofox-splice.py` 把橙狐 ramdisk 拼进**原厂 boot 模板**，
+kernel / header **逐字节保留**，dtb 继续留在 `vendor_boot` 里不动。
+
+所以 `prebuilt/` 里**只需要两个文件**：`Image` + `dtb.img`；
+其中 `dtb.img` 只是给 `BoardConfig.mk` 里的 `BOARD_PREBUILT_DTBIMAGE_DIR`
+历史配置留档……
+
+> ★更正★：`dtb.img` 现在**也不再被 BoardConfig 引用**了。
+> 保留它是因为 CI 的原料清单里有它、且将来若改回 DTB-in-bootimg 会用到。
+> 真正构建 `recovery.img` 只依赖 `prebuilt/Image`。
 
 ---
 
