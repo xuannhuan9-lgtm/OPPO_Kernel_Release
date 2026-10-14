@@ -85,9 +85,21 @@ on:
         type: string
         default: '1'
       go_maxprocs:
-        description: '★run #18 的靶子★ soong 的 Go 编译并发数（GOMAXPROCS）。OOM 就发生在编译 soong-*.a 这批 Go 目标时，每个吃 1~2GB。默认 2（配合 make_jobs=1）'
+        description: '★已证无效，保留★ GOMAXPROCS。run #19 实测：设 2 和设 4 内存曲线一样，都 OOM。'
         type: string
         default: '2'
+      gogc_override:
+        description: '★方案2核心★ Go GC 阈值 GOGC。默认 100（堆翻倍才回收）导致 soong_build 吃穿内存。设 20 = 堆涨 20% 就 GC，内存大降、速度变慢。设 0 = 关闭 GC（危险）。留空用默认 20'
+        type: string
+        default: '20'
+      gomemlimit_override:
+        description: '★方案2★ Go 运行时内存软上限（如 6GiB）。逼 soong_build 主动回收。留空用默认 6GiB'
+        type: string
+        default: '6GiB'
+      swap_total_mb:
+        description: '★方案4★ swap 总量（MB）。run #18/#19 实测 8192MB 被完全吃满 ⇒ 默认提到 32768。⚠ swap 命中是磁盘 IO，编译会极慢'
+        type: string
+        default: '32768'
 
 permissions:
   contents: read
@@ -106,6 +118,9 @@ jobs:
       DEVICE_TREE_REPO: ${{ inputs.device_tree_repo != '' && inputs.device_tree_repo || github.repository }}
       MAKE_JOBS: ${{ inputs.make_jobs }}
       GO_MAXPROCS: ${{ inputs.go_maxprocs }}
+      GOGC_OVERRIDE: ${{ inputs.gogc_override }}
+      GOMEMLIMIT_OVERRIDE: ${{ inputs.gomemlimit_override }}
+      SWAP_TOTAL_MB: ${{ inputs.swap_total_mb }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
       CCACHE_COMPRESS: '1'
@@ -163,19 +178,35 @@ jobs:
           echo "=== 加之前 ==="
           free -h
           sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile
-          sudo fallocate -l 8G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=8192
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          echo "=== 加之后（应该有 8GB Swap）==="
+          sudo rm -f /mnt/swapfile /mnt/swapfile2
+          # ★方案4★ 从 8G 提到 32G。
+          #   依据：run #18/#19 实测 swap 8191MB 被完全吃满 ⇒ 8G 明显不够，
+          #   而磁盘还剩 17GB+ 空余（df 显示 avail≈17700MB），
+          #   但 32G 单文件放不下 ⇒ 用 2 个 16G 文件分开放。
+          #   ⚠ 代价：swap 命中时是磁盘 IO，编译会非常慢（可能从 25 分钟变几小时）。
+          #   所以这个方案是"能不能编完"的赌注，不是"编得快"。
+          SWAP_MB="${SWAP_TOTAL_MB:-32768}"
+          HALF=$((SWAP_MB / 2))
+          echo "计划 swap 总量 = ${SWAP_MB}MB（分 2 个文件，每个 ${HALF}MB）"
+          for f in /mnt/swapfile /mnt/swapfile2; do
+            echo "--- 创建 $f (${HALF}MB) ---"
+            sudo fallocate -l "${HALF}M" "$f" 2>/dev/null \
+              || sudo dd if=/dev/zero of="$f" bs=1M count="$HALF" status=progress
+            sudo chmod 600 "$f"
+            sudo mkswap "$f"
+            sudo swapon "$f" || echo "  [!!] $f 启用失败（磁盘可能不够）"
+          done
+          echo "=== 加之后 ==="
           free -h
           swapon --show
           # 降低 OOM 概率：让内核更愿意回收 page cache 而不是杀进程
           sudo sysctl -w vm.swappiness=60 || true
           sudo sysctl -w vm.overcommit_memory=1 || true
-          echo "=== 磁盘（swap 占 8G）==="
+          sudo sysctl -w vm.vfs_cache_pressure=200 || true
+          echo "=== 磁盘 ==="
           df -h / /mnt | tail -3
+          echo "=== 实际 swap 总量 ==="
+          free -m | awk '/^Swap:/{print "  total = "$2" MB"}'
 
       - name: 安装依赖
         run: |
@@ -922,14 +953,25 @@ jobs:
           echo "--- df -h \$GITHUB_WORKSPACE ---"; df -h "$GITHUB_WORKSPACE" 2>/dev/null || true
           echo "--- swap ---"; swapon --show 2>/dev/null || cat /proc/swaps || true
           echo "--- 关键：磁盘 inode ---"; df -i / | tail -1 || true
-          # ★run #18 的靶子★ OOM 发生在编译 soong-*.a 那批 Go 目标时（每个 1~2GB）。
-          #   GOMAXPROCS 控制 soong 内部 Go 编译的并发度；不设的话它按 CPU 核数跑（4 核→4 个并发），
-          #   4×1.5GB ≈ 6GB，加上 soong 自身 ≈ 7GB ⇒ 正好把 7GB 内存 + 8GB swap 吃穿。
-          #   限制到 2 个并发，峰值大约砍一半。
+          # ★run #19 的新教训★ GOMAXPROCS=2 + make_jobs=1 【完全无效】：
+          #   #18(-j2): 14.3GB→835MB, swap 8191MB 满, 143
+          #   #19(-j1): 14.6GB→805MB, swap 8191MB 满, 143  ← 曲线一模一样
+          #   ⇒ 瓶颈不是并发数，而是【单进程 soong_build 解析 AOSP14 元数据】。
+          #     它是 Go 写的，Go 默认 GOGC=100（堆翻倍才回收），堆会一路涨到吃穿机器。
+          #     要控制它只能用 Go 运行时变量，-j / GOMAXPROCS 都够不着它。
           export GOMAXPROCS="${GO_MAXPROCS:-2}"
-          echo "GOMAXPROCS       = $GOMAXPROCS （限制 soong 的 Go 编译并发）"
+          # ★★ 真正对症的两个（方案2）★★
+          #   GOGC       = 20   → 堆只涨 20% 就 GC（默认 100）★最有效★，代价是变慢
+          #   GOMEMLIMIT = 6GiB → 给 Go 运行时设软上限，逼它主动回收
+          export GOGC="${GOGC_OVERRIDE:-20}"
+          export GOMEMLIMIT="${GOMEMLIMIT_OVERRIDE:-6GiB}"
+          echo "GOMAXPROCS       = $GOMAXPROCS （已证无效，保留以防万一）"
+          echo "GOGC             = $GOGC   ★Go GC 阈值（默认100，降到20省内存）"
+          echo "GOMEMLIMIT       = $GOMEMLIMIT   ★Go 运行时内存软上限"
           echo "MAKE_JOBS        = $MAKE_JOBS"
           echo "nproc            = $(nproc)"
+          echo "--- 当前 swap 总量 ---"
+          free -m | awk '/^Swap:/{print "  swap total = "$2" MB, used = "$3" MB"}'
 
           # ★soong 自举缓存★ actions/cache 只在 job 成功时保存，而本次多半会在 make 里 OOM，
           #   所以改成：如果缓存没命中、但我们自己之前存的 tar 在，就先解出来；
