@@ -395,6 +395,7 @@ jobs:
 
       - name: 同步 TWRP 精简源码（备选，托管在 GitHub，不依赖 GitLab）
         if: env.MANIFEST_SOURCE == 'twrp_minimal'
+        timeout-minutes: 45
         run: |
           set -o pipefail
           SRC_ROOT="$GITHUB_WORKSPACE/fox_src/OrangeFox"
@@ -422,12 +423,33 @@ jobs:
           echo "  [$CODE] https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp/tree/$TWRP_BRANCH"
           echo "::endgroup::"
 
-          echo "::group::repo init + sync"
+          echo "::group::repo init"
           "$HOME/bin/repo" init \
             -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
             -b "$TWRP_BRANCH" --depth=1 --no-repo-verify -q
-          "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags 2>&1 | tail -60
           echo "::endgroup::"
+
+          # ★原来这里写的是  repo sync ... | tail -60★
+          #   `| tail` 会把全部输出缓冲到结束才吐 ⇒ 日志里看不到任何进度，
+          #   看起来就像卡死（实测同步要 15~23 分钟，很正常）。
+          #   改成：后台跑 + 每 60 秒打一次心跳，进度实时可见。
+          echo "::group::repo sync（实时心跳）"
+          T0=$(date +%s)
+          "$HOME/bin/repo" sync -c -j"$MAKE_JOBS" --force-sync --no-clone-bundle --no-tags \
+              > /tmp/reposync.log 2>&1 &
+          SYNC_PID=$!
+          while kill -0 "$SYNC_PID" 2>/dev/null; do
+            sleep 60
+            kill -0 "$SYNC_PID" 2>/dev/null || break
+            echo "[心跳 $(($(date +%s)-T0))s] 日志 $(wc -l < /tmp/reposync.log) 行 | $(tail -1 /tmp/reposync.log | tr -d '\r' | cut -c1-110)"
+          done
+          wait "$SYNC_PID"; SYNC_RC=$?
+          echo "[同步结束] 耗时 $(($(date +%s)-T0))s，退出码 $SYNC_RC，日志 $(wc -l < /tmp/reposync.log) 行"
+          tail -40 /tmp/reposync.log
+          echo "::endgroup::"
+          if [ "$SYNC_RC" != "0" ]; then
+            echo "::warning::repo sync 退出码 $SYNC_RC（不一定是致命错误，继续看源码树是否完整）"
+          fi
 
           if [ ! -f "$SRC_ROOT/build/envsetup.sh" ]; then
             echo "::error::同步后没有 build/envsetup.sh，源码树不完整（分支 $TWRP_BRANCH）。"
@@ -645,6 +667,7 @@ jobs:
             ofox-${{ env.FOX_BRANCH }}-
 
       - name: lunch 并编译 recoveryimage
+        timeout-minutes: 120
         run: |
           set -o pipefail
           SRC_ROOT="${{ steps.srcroot.outputs.root }}"
