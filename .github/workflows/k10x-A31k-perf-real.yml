@@ -2157,6 +2157,25 @@ jobs:
               ./scripts/config --file out/.config --enable  DEFAULT_FQ 2>/dev/null || true
               ./scripts/config --file out/.config --disable DEFAULT_PFIFO_FAST 2>/dev/null || true
 
+              # ------------------------------------------------------------
+              # ★第 22 轮：CONFIG_SECTION_MISMATCH_WARN_ONLY★
+              # ------------------------------------------------------------
+              # run#14 现象：所有 .c 都编过了、vmlinux.o 也链接成功，最后卡在
+              #   FATAL: modpost: Section mismatches detected.
+              #   Set CONFIG_SECTION_MISMATCH_WARN_ONLY=y to allow them.
+              #
+              # 报错来自 vmlinux.o 里 update_manifest() / update_telephony_manifest()
+              # 引用 .init.data:boot_command_line（就是少了 __initdata 标注），
+              # 属于上游新推的 OPPO 代码带来的。这类 section mismatch 不影响运行，
+              # 只是 modpost 严格模式把它当致命错。
+              #
+              # defconfig 现状：
+              #   # CONFIG_DEBUG_SECTION_MISMATCH is not set
+              #   # CONFIG_SECTION_MISMATCH_WARN_ONLY is not set
+              # 设成 y 就降级为警告，内核照常产出。
+              # ------------------------------------------------------------
+              ./scripts/config --file out/.config --enable SECTION_MISMATCH_WARN_ONLY 2>/dev/null || true
+
               # ★重跑 olddefconfig 让 Kconfig 解析 choice★
               echo "===== 重跑 olddefconfig（让 Kconfig 接受 DEFAULT_BBR）====="
               make -j"$(nproc)" O=out olddefconfig >/dev/null 2>&1 \
@@ -2193,8 +2212,21 @@ jobs:
               echo "     TCP_CONG_BBR      = $(./scripts/config --file out/.config --state TCP_CONG_BBR)"
               echo "     DEFAULT_BBR       = $(./scripts/config --file out/.config --state DEFAULT_BBR)"
               echo "     DEFAULT_CUBIC     = $(./scripts/config --file out/.config --state DEFAULT_CUBIC)"
-              echo "     DEFAULT_TCP_CONG  = $(grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config | cut -d= -f2)"
+              echo "     DEFAULT_TCP_CONG  = $( { grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config || true; } | cut -d= -f2)"
               echo "     NET_SCH_FQ        = $(./scripts/config --file out/.config --state NET_SCH_FQ)"
+              # ★第 22 轮断言：SECTION_MISMATCH_WARN_ONLY 必须 = y★
+              # run#14 就是缺这一项，在 modpost 最后一步挂掉（vmlinux.o 都链接好了）
+              SMW="$(./scripts/config --file out/.config --state SECTION_MISMATCH_WARN_ONLY || true)"
+              echo "     SECTION_MISMATCH_WARN_ONLY = ${SMW:-未设置}"
+              if [ "$SMW" != "y" ]; then
+                echo "::error title=开机::SECTION_MISMATCH_WARN_ONLY 不是 y，modpost 会在最后一步 FATAL 退出"
+                echo "  当前 state=$SMW"
+                echo "  --- defconfig 原值 ---"
+                grep -n 'SECTION_MISMATCH' "$BUILD_DIR/arch/arm64/configs/${DEFCONFIG_NAME:-k10x_defconfig}" 2>/dev/null || true
+                grep -n 'SECTION_MISMATCH' out/.config || true
+                exit 1
+              fi
+              echo "  ✓ SECTION_MISMATCH_WARN_ONLY=y 已确认（modpost 只警告不致命）"
               case "${{ inputs.perf }}" in
                 bbr+o3|bbr+o3+fast)
                   ./scripts/config --file out/.config --enable CC_OPTIMIZE_FOR_PERFORMANCE_O3
