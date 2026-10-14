@@ -1551,6 +1551,54 @@ jobs:
               exit 1
             fi
             echo "  行数=$(wc -l < out/.config)  ARCH_QCOM=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★缺失★'; } )"
+
+            # ============================================================
+            # ★第 25 轮 · olddefconfig 到底删了什么★
+            # ------------------------------------------------------------
+            # 铁证链条（run#16 / run#17）：
+            #   cp defconfig out/.config         → 6967 行，CONFIG_ARCH_QCOM=y ✓
+            #   make O=out olddefconfig          → 6460 行，ARCH_QCOM 整行消失 ✗
+            #   中间只有我的一句 echo，没有任何别的写操作
+            #   olddefconfig 返回码 0、0 个 (NEW)、无 Restart、无 Error
+            #   源文件都对：Kconfig:336 source、Kconfig.platforms 10584 字节、
+            #              183 行 config ARCH_QCOM —— 和本地 clone 逐字节一致
+            # 所以必须把「它到底删了哪些行」直接打出来，不再猜。
+            # ============================================================
+            if [ ! -f "$RUNNER_TEMP/defconfig_before.txt" ]; then :; fi
+            cp -f "$DEFCONFIG" "$RUNNER_TEMP/cfg_before.txt" 2>/dev/null || true
+            echo "  ---- olddefconfig 删掉/改动的行（最多 60 条）----"
+            diff "$RUNNER_TEMP/cfg_before.txt" out/.config 2>/dev/null \
+              | grep -E '^[<>]' | head -60 || true
+            echo "  ---- 删除行总数 ----"
+            { diff "$RUNNER_TEMP/cfg_before.txt" out/.config 2>/dev/null || true; } \
+              | { grep -c '^<' || true; } || true
+            echo "  ---- 被删掉的 ARCH_* 符号 ----"
+            { diff "$RUNNER_TEMP/cfg_before.txt" out/.config 2>/dev/null || true; } \
+              | grep -E '^< CONFIG_(ARCH_[A-Z0-9_]+|ARM64[A-Z0-9_]*)=' | head -40 || true
+            echo "  ---- 保留的 ARCH_* 符号（看还剩什么）----"
+            grep -E '^CONFIG_(ARCH_[A-Z0-9_]+|ARM64[A-Z0-9_]*)=y' out/.config | head -20 || true
+            echo "  ---- 关键：Kconfig 认不认这些符号（用 conf --listnewconfig）----"
+            set +e
+            make O=out listnewconfig > "$RUNNER_TEMP/newcfg.log" 2>&1
+            echo "    listnewconfig 返回码=$?"
+            head -20 "$RUNNER_TEMP/newcfg.log" 2>/dev/null || true
+            set -e
+            echo "  ---- out/ 目录结构（确认没有残留缓存）----"
+            ls -la out/ 2>/dev/null | head -20 || true
+            echo "    out/include/config 存在吗："
+            ls -d out/include/config 2>/dev/null && echo "      ★存在 —— 可能有旧缓存★" || echo "      不存在（干净）"
+            echo "  ---- 内核源码版本（确认 BUILD_DIR 是哪个树）----"
+            head -4 Makefile 2>/dev/null || true
+            echo "    arch/arm64/Kconfig.platforms 的 sha256："
+            sha256sum arch/arm64/Kconfig.platforms 2>/dev/null || true
+            echo "  ---- 直接问 Kconfig：ARCH_QCOM 的定义能不能被解析出来 ----"
+            if [ -x scripts/kconfig/conf ]; then
+              echo "    (scripts/kconfig/conf 已存在)"
+            else
+              echo "    (scripts/kconfig/conf 还没有，qconf 会在 olddefconfig 时生成)"
+            fi
+            grep -n 'config ARCH_QCOM' arch/arm64/Kconfig.platforms 2>/dev/null || true
+            sed -n '180,190p' arch/arm64/Kconfig.platforms 2>/dev/null | cat -A | head -12 || true
             # ★硬断言：平台符号必须在强开之前就立住★
             for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS NET; do
               if ! grep -qE "^CONFIG_${s}=y" out/.config; then
