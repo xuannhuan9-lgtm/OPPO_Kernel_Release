@@ -2209,13 +2209,19 @@ jobs:
       - name: Configure Kernel — 对比 defconfig（诊断，不阻塞）
         shell: bash
         run: |
-          set -Eeuxo pipefail
+          set -uo pipefail
           cd "$BUILD_DIR"
+          export PATH="$CLANG_DIR/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          # ★拆 step 后 DEFCONFIG 丢了（原 step 里的局部变量），这里补回来★
+          DEFCONFIG="${DEFCONFIG_USED:-$GITHUB_WORKSPACE/../_temp/sm6375_defconfig}"
+          [ -f "$DEFCONFIG" ] || DEFCONFIG="$(ls -1 /home/runner/work/_temp/sm6375_defconfig 2>/dev/null || echo "$DEFCONFIG")"
+          echo "  DEFCONFIG=$DEFCONFIG"
           echo "===== KSU / susfs / KPM 配置 ====="
           grep -E 'CONFIG_(KSU|KSU_SUSFS|KPM|KALLSYMS|THREAD_INFO_IN_TASK|KPROBES|KRETPROBES|FTRACE)=' out/.config || true
 
           echo "===== 被丢弃的符号（=y/=m 但最终没生效）====="
-          python3 - "$DEFCONFIG" out/.config <<'PY'
+          python3 - "$DEFCONFIG" out/.config <<'PY' || true
           import re, sys
           def load(p):
               d = {}
