@@ -433,30 +433,51 @@ jobs:
             echo "  [--] 没有 $FBH"
           fi
 
-          # memlat_scmi.c / rimps_memlat.c：从 Makefile 里摘掉（本内核没有新 SCMI 框架）
-          for mf in "$BUILD_DIR/drivers/soc/qcom/Makefile"; do
+          # ------------------------------------------------------------
+          # memlat：本内核 include/linux/scmi_protocol.h 没有
+          #   struct scmi_handle.memlat_ops / struct scmi_memlat_vendor_ops
+          #   / SCMI_PROTOCOL_MEMLAT
+          # 但 memlat_scmi.c 和 rimps_memlat.c 用到它们 => 编译必炸。
+          #
+          # ★第 20 轮修正★ 上次 sed 只匹配一行，漏了：
+          #   obj-$(CONFIG_QTI_HW_MEMLAT) += rimps_memlat.o
+          # 这次用 awk 通用处理：这批 Makefile 里任何引用这两个 .o 的行
+          # 只要不是注释，就整行注释掉。并做硬校验。
+          # ------------------------------------------------------------
+          for mf in \
+              "$BUILD_DIR/drivers/soc/qcom/Makefile" \
+              "$BUILD_DIR/drivers/soc/qcom/scmi/Makefile" ; do
             [ -f "$mf" ] || continue
-            if grep -q 'memlat_scmi\|rimps_memlat' "$mf"; then
-              cp -f "$mf" "$mf.a31k.orig"
-              sed -i \
-                -e 's/^\(obj-\$(CONFIG_QTI_SCMI_MEMLAT_PROTOCOL)\)/# A31k: 跳过（本内核无新 SCMI 框架） # \1/' \
-                -e 's/^\(obj-\$(CONFIG_QTI_HW_MEMLAT_SCMI_CLIENT)\)/# A31k: 跳过 # \1/' \
-                "$mf"
-              echo "  [OK] 已注释 memlat_scmi/rimps_memlat 的 obj 行"
-              echo "  --- 相关行 ---"
+            if grep -qE '(memlat_scmi|rimps_memlat)\.o' "$mf"; then
+              [ -f "$mf.a31k.orig" ] || cp -f "$mf" "$mf.a31k.orig"
+              awk '
+                /(memlat_scmi|rimps_memlat)\.o/ && $0 !~ /^[[:space:]]*#/ {
+                  print "# A31k skip (no new SCMI framework): " $0; next
+                }
+                { print }
+              ' "$mf" > "$mf.a31k.tmp"
+              mv -f "$mf.a31k.tmp" "$mf"
+              echo "  [OK] 已处理 $mf"
+              echo "  --- 该文件里所有 memlat 行 ---"
               grep -n 'memlat' "$mf" | sed 's/^/    /'
             fi
           done
 
-          # 兜底：如果 Makefile 里没有显式 obj 行，就把源文件改名让它编不到
-          for bad in drivers/soc/qcom/memlat_scmi.c drivers/soc/qcom/rimps_memlat.c; do
-            f="$BUILD_DIR/$bad"
-            if [ -f "$f" ]; then
-              case "$(grep -rl "$(basename $bad .c).o" "$BUILD_DIR/drivers/soc/qcom/Makefile" 2>/dev/null)" in
-                "") ;;  # Makefile 没引用，不用管
-              esac
-            fi
+          # 硬校验：不能有【生效的】memlat .o 引用
+          ML_LEFT=0
+          for mf in "$BUILD_DIR/drivers/soc/qcom/Makefile" "$BUILD_DIR/drivers/soc/qcom/scmi/Makefile"; do
+            [ -f "$mf" ] || continue
+            n=$(grep -E '(memlat_scmi|rimps_memlat)\.o' "$mf" | grep -vc '^[[:space:]]*#')
+            ML_LEFT=$((ML_LEFT+n))
           done
+          if [ "$ML_LEFT" -gt 0 ]; then
+            echo "::error title=兼容补丁::还有 $ML_LEFT 行 memlat .o 没注释掉"
+            for mf in "$BUILD_DIR/drivers/soc/qcom/Makefile" "$BUILD_DIR/drivers/soc/qcom/scmi/Makefile"; do
+              [ -f "$mf" ] && grep -nE '(memlat_scmi|rimps_memlat)\.o' "$mf" | sed 's/^/    /'
+            done
+            exit 1
+          fi
+          echo "  [OK] 校验通过：没有生效的 memlat .o 引用了"
           echo "  ✓ 上游兼容补丁完成"
           echo
 
@@ -2284,10 +2305,25 @@ jobs:
           echo "PATH 前两项: $(echo "$PATH" | cut -d: -f1,2)"
           echo "clang 解析到: $(command -v clang)"
           echo "ccache 解析到: $(command -v ccache)"
-          if ! make -j"$(nproc)" O=out DISABLE_WRAPPER=1 $EXTRA_KSU_VARS $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
-            echo "========== 编译失败 =========="
+          # ============================================================
+          # ★第 20 轮：编译加 -k（keep going）★
+          # ------------------------------------------------------------
+          # 之前用 make -j 不带 -k，make 在【第一个】出错的目录就停，
+          # 所以每次日志只暴露 1-2 个错误，只能一轮轮打地鼠（run#9/#11/#12）。
+          # 加 -k 后 make 会继续编其他不依赖失败目标的目录，一次把【所有】
+          # 编译错误都吐出来，一轮就能修完。
+          # 代价：失败时多花几分钟把能编的编完，但省下好几轮 25 分钟。
+          # ============================================================
+          if ! make -j"$(nproc)" -k O=out DISABLE_WRAPPER=1 $EXTRA_KSU_VARS $TARGETS 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+            echo "========== 编译失败（-k 模式，已尽量收集全部错误）=========="
+          # ★列出【所有】不同的报错文件，而不是只取前 8 行★
           grep -anE 'ld\.lld: error|ld: error|undefined symbol|fatal error:|: error:|forbidden warning' \
-            "$RUNNER_TEMP/build.log" | head -8 > "$RUNNER_TEMP/errs.txt" || true
+            "$RUNNER_TEMP/build.log" > "$RUNNER_TEMP/errs_all.txt" || true
+          echo "===== 全部报错文件清单（去重）====="
+          grep -oE '[a-zA-Z0-9_/.+-]+\.(c|h|S):[0-9]+' "$RUNNER_TEMP/errs_all.txt" 2>/dev/null \
+            | sed 's/:[0-9]*$//' | sort -u | head -60 || true
+          echo "===== 报错总数: $(wc -l < "$RUNNER_TEMP/errs_all.txt") 行 ====="
+          head -8 "$RUNNER_TEMP/errs_all.txt" > "$RUNNER_TEMP/errs.txt" || true
           if [ -s "$RUNNER_TEMP/errs.txt" ]; then
             cut -d: -f1 "$RUNNER_TEMP/errs.txt" | head -2 | while read -r L; do
               S=$((L-25)); [ "$S" -lt 1 ] && S=1
