@@ -1485,35 +1485,10 @@ jobs:
           else
             echo "===== 配置来源：$DEFCONFIG ====="
 
-            # ============================================================
-            # ★第 29 轮 · 根治「卡二屏」★ —— 消除 CRLF，掐掉 Restart config
-            # ------------------------------------------------------------
-            # 现场证据（run#7 能开机 / run#21 卡二屏）：
-            #              run#7 ✅      run#21 ❌
-            #   CRLF 警告     175           200
-            #   Restart config  1             9     <-- 9 倍
-            #   scs.o           2             0     <-- 丢了
-            #   cfi.o           1             0     <-- 丢了
-            #   "SHADOW_CALL_STACK) [N/y/?] (NEW)" 被问: 0 次 / 1 次
-            #
-            # 卡二屏机理：
-            #   Restart config 时 Kconfig 要交互提问，而 stdin=/dev/null，于是
-            #     Clang Shadow Call Stack (SHADOW_CALL_STACK) [N/y/?] (NEW)
-            #     Error in reading or end of file.        -> 取默认 N
-            #     Link-Time Optimization (LTO)
-            #     > 1. None (LTO_NONE)                     -> 取默认 1
-            #   而 arch/Kconfig 里：
-            #     CFI_CLANG  depends on LTO_CLANG && KALLSYMS
-            #     LTO_CLANG  depends on CC_IS_CLANG && CLANG_VERSION>=100000 && LD_IS_LLD
-            #   于是 SCS / CFI / LTO 连锁失效 -> scs.o / cfi.o 根本没编。
-            #   原厂 /vendor/lib/modules/*.ko 是按 SCS+CFI 编的，加载不上 -> 卡二屏。
-            #
-            # Restart 的触发源：OPPO 给的 7 个 Kconfig 文件是 CRLF 行尾，
-            #   报 200 行 "warning: ignoring unsupported character"，
-            #   把这个 \r 去掉就不会再 Restart。
-            #   （run#7 只 Restart 1 次所以侥幸没丢 SCS/CFI；
-            #     run#21 因为我多跑了几次 olddefconfig，放大成 9 次，就丢了。）
-            # ============================================================
+            # 第 29 轮：OPPO 的 Kconfig 是 CRLF 行尾，会让 Kconfig 反复 Restart config。
+            # Restart 时交互提问但 stdin=/dev/null -> SHADOW_CALL_STACK 取 N、LTO 取 LTO_NONE
+            # -> CFI_CLANG 连锁失效 -> scs.o/cfi.o 不编 -> vendor 模块加载失败 -> 卡二屏。
+            # 去掉 \r 即可从源头掐掉 Restart（run#7 只 Restart 1 次所以侥幸没事）。
             echo "===== 第 29 轮：清理 Kconfig 的 CRLF 行尾（掐掉 Restart config）====="
             CRLF_FIXED=0
             while IFS= read -r kf; do
@@ -1527,61 +1502,9 @@ jobs:
             echo "  剩余含 CR 的 Kconfig：$( { find . -name 'Kconfig*' -type f -not -path './out/*' -exec grep -lU $'\r' {} + 2>/dev/null || true; } | wc -l )"
 
             cp "$DEFCONFIG" out/.config
-            # ------------------------------------------------------------
-            # ★第 23 轮：这里【必须先 olddefconfig 一次】★
-            # ------------------------------------------------------------
-            # run#14 实测真相（差点酿成刷机变砖）：
-            #   cp defconfig -> scripts/config 强开 26 个符号 -> …… -> 第 1874 行
-            #   才跑第一次 olddefconfig。结果 Kconfig 报：
-            #
-            #     WARNING: unmet direct dependencies detected for QCOM_QMI_HELPERS
-            #       Depends on [n]: (ARCH_QCOM [=n] || COMPILE_TEST [=n]) && NET [=y]
-            #       Selected by [y]:
-            #       - MSM_SUBSYSTEM_RESTART [=y]     <- 正是我们强开的
-            #       - MSM_SERVICE_LOCATOR [=y]       <- 也是我们强开的
-            #
-            #   unmet 触发 Kconfig 的 "Restart config..." 全量重走；重走时要交互
-            #   提问，而 stdin 是 /dev/null，于是满屏：
-            #     Qualcomm Platforms (ARCH_QCOM) [N/y/?] (NEW)
-            #     ★Error in reading or end of file.★
-            #   全部取默认 N => ARCH_QCOM=n => 541 个高通 .o 全丢：
-            #     kgsl(GPU) 18->0、qcom_scm 4->0、ARM_SMMU/iommu、clk/qcom、
-            #     pinctrl/qcom、crypto/msm、techpack/camera…
-            #
-            #   最阴险的是 make 不报错，照样 LD vmlinux.o 成功 —— 编出来是个
-            #   【GPU/SCM/iommu 全没有的空壳内核】，刷进去必炸。
-            #
-            # 对比实证：run#7  unmet=0 / Error-in-reading=15 / (NEW)=17
-            #           run#14 unmet=3 / Error-in-reading=206 / (NEW)=215
-            #
-            # 修法：拷完 defconfig 立刻 olddefconfig 一次，让 .config 在
-            #       【强开之前】就已经和当前 Kconfig 树自洽（ARCH_QCOM 等
-            #       平台符号被正确认到）。这样后面强开时依赖关系是完整的。
-            #       强开之后第 1874 行还会再跑一次 olddefconfig 收尾。
-            # ------------------------------------------------------------
-            # ★★第 26 轮 · 致命修复★★
-            # run#18 的 diff 铁证：
-            #   < # Linux/arm64 5.4.254 Kernel Configuration   (cp 进去的 defconfig)
-            #   > # Linux/x86   5.4.233 Kernel Configuration   (olddefconfig 之后!)
-            #   < CONFIG_ARM64=y            > CONFIG_X86_64=y
-            #   < CONFIG_CC_IS_CLANG=y      > CONFIG_CC_IS_GCC=y
-            # 原因：这个步骤在配置流程最开头，此时【还没 export ARCH】。
-            #       make 不带 ARCH 就用宿主机的 x86_64 => 加载 arch/x86/Kconfig
-            #       => 所有 arm64 符号(含 ARCH_QCOM)全被当成未知符号删掉。
-            #       (第 1991 行那个 export ARCH=arm64 在【本步骤之后】，救不了这里)
-            # 修法：本步骤开头就 export，并且每条 make 都显式带 ARCH=arm64。
-            # ★第 27 轮补全★
-            # run#19 的 diff 又暴露一层：
-            #   < # Compiler: Android clang version 11.0.2      (defconfig 期望 Clang)
-            #   > # Compiler: aarch64-buildroot-linux-gnu-gcc   9.3.0   (实际用了 GCC!)
-            #   < CONFIG_CC_IS_CLANG=y   > CONFIG_CC_IS_GCC=y
-            #   < CONFIG_LTO_CLANG=y     > CONFIG_LTO_NONE=y
-            #   < CONFIG_CFI_CLANG=y     > (没了)
-            #   < CONFIG_SHADOW_CALL_STACK=y > (没了)
-            # 因为 defconfig 里 LTO/CFI/CC_IS_CLANG 这些符号是【按编译器探测结果】算出来的。
-            # 只给 ARCH 不给 CC=clang，探测出 GCC => 这些符号全失效 =>
-            # Kconfig 报 unmet => Restart config => ARCH_QCOM 被重置成 N。
-            # 所以这里必须把主步骤那套完整 Clang 环境【提前】摆好。
+            # 第 23~27 轮：拷完 defconfig 立刻 olddefconfig，让 .config 与当前
+            # Kconfig 树自洽。必须带全 ARCH + Clang 环境，否则会退化成 x86/GCC。
+            # CC=clang 必须给，否则探测成 GCC -> LTO/CFI 失效 -> unmet -> Restart。
             export PATH="$CLANG_DIR/bin:$PATH"
             export ARCH=arm64 SUBARCH=arm64
             export CC=clang LD=ld.lld LLVM=1
@@ -1626,18 +1549,7 @@ jobs:
             fi
             echo "  行数=$(wc -l < out/.config)  ARCH_QCOM=$( { grep -E '^CONFIG_ARCH_QCOM=' out/.config || echo '★缺失★'; } )"
 
-            # ============================================================
-            # ★第 25 轮 · olddefconfig 到底删了什么★
-            # ------------------------------------------------------------
-            # 铁证链条（run#16 / run#17）：
-            #   cp defconfig out/.config         → 6967 行，CONFIG_ARCH_QCOM=y ✓
-            #   make O=out olddefconfig          → 6460 行，ARCH_QCOM 整行消失 ✗
-            #   中间只有我的一句 echo，没有任何别的写操作
-            #   olddefconfig 返回码 0、0 个 (NEW)、无 Restart、无 Error
-            #   源文件都对：Kconfig:336 source、Kconfig.platforms 10584 字节、
-            #              183 行 config ARCH_QCOM —— 和本地 clone 逐字节一致
-            # 所以必须把「它到底删了哪些行」直接打出来，不再猜。
-            # ============================================================
+            # 第 25 轮：打印 olddefconfig 前后差异，便于定位
             if [ ! -f "$RUNNER_TEMP/defconfig_before.txt" ]; then :; fi
             cp -f "$DEFCONFIG" "$RUNNER_TEMP/cfg_before.txt" 2>/dev/null || true
             echo "  ---- olddefconfig 删掉/改动的行（最多 60 条）----"
@@ -2120,16 +2032,8 @@ jobs:
           echo "  ★确认：CONFIG_ARCH_QCOM=y ⇒ kgsl/qcom_scm/ARM_SMMU 等 541 个高通 .o 会正常编译★"
           echo
 
-          # ============================================================
-          # ★第 29 轮 · 第三层防线：SCS / CFI / LTO 安全插桩★
-          # ------------------------------------------------------------
-          # 这三个是【卡二屏】的直接原因，而且它们最容易在 Restart config
-          # 时被静默重置（默认分别是 N / N / LTO_NONE）。
-          # 原厂 /vendor/lib/modules/*.ko 是按 SCS+CFI 编译的，内核必须一致，
-          # 否则模块加载失败 -> 卡二屏。
-          # run#7（能开机）scs.o=2 cfi.o=1；run#21（卡二屏）scs.o=0 cfi.o=0。
-          # 这里在编译前【强制写回】并硬断言。
-          # ============================================================
+          # 第 29 轮：SCS/CFI/LTO 是卡二屏的直接原因，最容易在 Restart 时被静默重置。
+          # 原厂 .ko 按 SCS+CFI 编，内核必须一致。这里编译前强制写回并硬断言。
           echo "===== 第 29 轮：SCS / CFI / LTO 安全插桩（防卡二屏）====="
           echo "  修改前："
           grep -E '^CONFIG_(CC_IS_CLANG|CLANG_VERSION|LD_IS_LLD|LTO|LTO_NONE|LTO_CLANG|THINLTO|CFI_CLANG|CFI_CLANG_SHADOW|SHADOW_CALL_STACK|KALLSYMS)=' out/.config | sed 's/^/    /' || true
