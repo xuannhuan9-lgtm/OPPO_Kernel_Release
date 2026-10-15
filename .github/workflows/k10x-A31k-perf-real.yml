@@ -1887,19 +1887,32 @@ jobs:
           cd "$BUILD_DIR"
           test -f out/.config || { echo "::error title=性能::out/.config 还没生成"; exit 1; }
 
-          # ★默认优化：关掉纯调试/统计开销（这些在原厂工程配置里是开着的，日常用不到）★
-          echo "===== 关闭调试/统计开销 ====="
-          # 注意：KSU_SUSFS_ENABLE_LOG 保持开启 —— 工作流有多处校验要求它为 y，
-          #       关掉会让「Configure Kernel 校验」直接失败（A24 就栽在这里）。
-          # 只关 SCHEDSTATS：它对每个任务/每个 CPU 一直在累加统计，关掉有真实收益。
-          #   关掉后 debug.o 不编译，/proc/sys/kernel/sched_* 那些调参项会整段消失（内核管理器就调不了了），
-          #   而它本身对性能几乎没影响，得不偿失。
-          # DEBUG_LIST 也保持开启：它是链表自检，收益极小、留着更稳。
-          ./scripts/config --file out/.config --disable SCHEDSTATS 2>/dev/null || true
+          # ★★ A21：SCHEDSTATS 必须保持 y —— 它守卫结构体，关掉会破坏 kABI ★★
+          #   include/linux/sched.h:466
+          #       struct sched_statistics {
+          #       #ifdef CONFIG_SCHEDSTATS      <= 大块字段全在这守卫里
+          #           u64 wait_start; ...
+          #       #endif
+          #       };
+          #   include/linux/sched.h:517
+          #       struct sched_statistics  statistics;   <= 这是 struct sched_entity 的成员
+          #   => sched_entity 变短几百字节 => 它嵌在 task_struct 里 => task_struct 布局改变
+          #   => 所有原厂 .ko（midas/btpower/techpack/wlan）按含字段的布局编译，
+          #      读 task_struct 时读到错位内存 => 轻则统计错乱、重则 NULL 解引用 panic。
+          #   ★实测教训★ oplus_bsp_midas.ko 的 midas_record_task_times 会读
+          #     p->time_in_state[state]；布局错位时读到的就是垃圾/0 => 正好对上
+          #     崩溃现场里的 x0=0（NULL 解引用）。这条被长期忽略，是「卡第一屏」
+          #     反复出现的深层原因之一。
+          #   ★通用原则★ 凡是出现在 include/linux/sched.h 等核心结构体 #ifdef 里的
+          #     CONFIG_*，一律照原厂（原厂 =y 就不能关）。审计方法见本步骤下方注释。
+          ./scripts/config --file out/.config --enable SCHEDSTATS 2>/dev/null || true
           for k in SCHEDSTATS SCHED_DEBUG DEBUG_LIST; do
             printf "  %-22s = %s\n" "$k" "$(./scripts/config --file out/.config --state "$k" 2>/dev/null || echo '-')"
           done
-          echo "::notice title=优化::只关了 SCHEDSTATS（SCHED_DEBUG/DEBUG_LIST/KSU_SUSFS_ENABLE_LOG 都保持开启）；loglevel=${{ inputs.extra_cmdline }}"
+          grep -qE '^CONFIG_SCHEDSTATS=y' out/.config \
+            || { echo "::error::SCHEDSTATS 必须是 y（原厂=y；它守卫 struct sched_statistics，关掉会破坏 kABI）"; exit 1; }
+          echo "  OK SCHEDSTATS=y（task_struct 布局与原厂一致，kABI 完整）"
+          echo "::notice title=优化::SCHEDSTATS 保持 y（★kABI 红线，原厂=y★）；SCHED_DEBUG/DEBUG_LIST/KSU_SUSFS_ENABLE_LOG 也都保持开启；loglevel=${{ inputs.extra_cmdline }}"
 
           case "${{ inputs.perf }}" in bbr|bbr+fast|bbr+o3|bbr+o3+fast) PERF_ON=1;; *) PERF_ON=0;; esac
           if [ "$PERF_ON" = "1" ]; then
@@ -2416,6 +2429,106 @@ jobs:
           grep -q 'trace_android_vh_cpufreq_acct_update_power(cputime, p, state); \*/' "$F"             || { echo "::error::注释没写进去"; exit 1; }
           echo "  OK 那一行已注释；CONFIG_CPU_FREQ_TIMES 仍为 y（kABI 完整）"
           echo "::notice title=A20::midas 的 cpufreq hook 调用点已剪掉（tick 路径上它只有这一个）—— 卡第一屏根治，且未动 task_struct 布局"
+
+      # ==========================================================================
+      # ★ A21：kABI 自动审计关卡★
+      #   起因：A19（关 CPU_FREQ_TIMES）和 A21（关 SCHEDSTATS）都犯了同一个错 ——
+      #   把「守卫核心结构体字段的 CONFIG_*」关掉，导致结构体大小/偏移改变，
+      #   原厂 .ko（按原厂布局编译）读 task_struct 时错位 =>
+      #   轻则统计错乱、重则 NULL 解引用 panic / system_server 崩溃软重启循环。
+      #   做法：拿原厂 k10x_defconfig 当基准，找出「原厂 y/m 但我们 n」的符号，
+      #   去 include/ 全树里查它有没有出现在【核心结构体】的 #if 守卫里，
+      #   命中就 ::error 中止构建 —— 编译前 1 分钟拦住，不浪费 25 分钟。
+      #   注意：.config 必须已经 olddefconfig 过（由上一步保证）。
+      # ==========================================================================
+      - name: ★kABI 审计★ 已关的符号里有没有守卫核心结构体的
+        if: ${{ inputs.enable_ksu }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$BUILD_DIR"
+          STOCK="$GITHUB_WORKSPACE/k10x_defconfig"
+          if [ ! -f "$STOCK" ]; then
+            echo "::warning::找不到原厂 k10x_defconfig，跳过 kABI 审计"
+            exit 0
+          fi
+          test -f out/.config || { echo "::error::out/.config 不存在，审计无处可查"; exit 1; }
+          echo "===== kABI 审计：原厂 defconfig vs 我们的 out/.config ====="
+          python3 - "$STOCK" out/.config <<'PYEOF'
+          import io, os, re, sys
+
+          stock_p, our_p = sys.argv[1], sys.argv[2]
+
+          def load(p):
+              d = {}
+              for line in io.open(p, encoding='utf8', errors='replace'):
+                  line = line.strip()
+                  m = re.match(r'^CONFIG_([A-Z0-9_]+)=(.*)$', line)
+                  if m:
+                      d[m.group(1)] = m.group(2).strip(); continue
+                  m = re.match(r'^# CONFIG_([A-Z0-9_]+) is not set$', line)
+                  if m:
+                      d[m.group(1)] = 'n'
+              return d
+
+          stock, ours = load(stock_p), load(our_p)
+          danger = {k for k, v in stock.items() if v in ('y', 'm') and ours.get(k) == 'n'}
+          print("  原厂 y/m 但我们关掉的符号: %d 个" % len(danger))
+
+          CRITICAL = set("""task_struct sched_entity sched_statistics sched_domain sched_group
+          mm_struct vm_area_struct cred signal_struct files_struct fs_struct nsproxy
+          inode file dentry super_block mount cgroup css_set cgroup_subsys_state
+          pid task_group rq cfs_rq rt_rq dl_rq root_domain module
+          request_queue gendisk bio page net_device sock socket proto timekeeper
+          key user_struct uts_namespace mnt_namespace pid_namespace
+          perf_event perf_event_context seccomp_filter io_context""".split())
+
+          ALLOW = set("""MODVERSIONS MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE
+          KEXEC_SIG KEXEC_SIG_FORCE SYSTEM_BLACKLIST_KEYRING
+          IMA EVM INTEGRITY_SIGNATURE
+          LOCALVERSION_AUTO DEBUG_INFO INIT_ON_ALLOC_DEFAULT_ON INIT_STACK_ALL_ZERO
+          CC_OPTIMIZE_FOR_PERFORMANCE""".split())
+
+          danger -= ALLOW
+          if not danger:
+              print("  OK 没有需要审计的符号（其余差异已核实为安全）")
+              sys.exit(0)
+
+          hits = {}
+          for root, dirs, files in os.walk('include'):
+              for f in files:
+                  if not f.endswith('.h'):
+                      continue
+                  path = os.path.join(root, f)
+                  try:
+                      lines = io.open(path, encoding='utf8', errors='replace').read().split('\n')
+                  except Exception:
+                      continue
+                  brace = 0; cur = []
+                  for n, l in enumerate(lines, 1):
+                      ms = re.search(r'\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)?\s*\{', l)
+                      if ms:
+                          cur.append((brace + 1, ms.group(1) or '?'))
+                      mm = re.search(r'#\s*if.*?CONFIG_([A-Z0-9_]+)', l)
+                      if mm and mm.group(1) in danger and cur and cur[-1][1] in CRITICAL:
+                          hits.setdefault(mm.group(1), []).append((path, n, cur[-1][1]))
+                      brace += l.count('{') - l.count('}')
+                      while cur and brace < cur[-1][0]:
+                          cur.pop()
+
+          if hits:
+              print("::error title=kABI 破坏风险::这些【已关掉】的符号守卫着核心结构体")
+              for sym in sorted(hits):
+                  print("  * %s （原厂=%s，我们=n）" % (sym, stock.get(sym)))
+                  for p, n, st in hits[sym][:4]:
+                      print("      %s:%d  在 struct %s 内" % (p, n, st))
+              print("  => 关掉它会让该结构体大小/偏移改变 => 原厂 .ko 读 task_struct 时错位")
+              print("  => 正解：照原厂保持 =y，改在源码里动那一处代码（参考 A20 的做法）")
+              sys.exit(1)
+
+          print("  OK 已关的 %d 个符号都不守卫核心结构体（kABI 安全）" % len(danger))
+          PYEOF
+          echo "  ✓ kABI 审计通过"
 
       - name: Configure Kernel — 对比 defconfig（诊断，不阻塞）
         shell: bash
