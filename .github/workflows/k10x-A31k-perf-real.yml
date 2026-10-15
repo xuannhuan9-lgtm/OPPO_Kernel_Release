@@ -1723,7 +1723,7 @@ jobs:
           # 真正的把关在「Configure Kernel 校验」那一步的 =y / =m 断言。
           [ "$DRV_OK"  -eq 11 ] || echo "::warning::内建表命中 $DRV_OK 个（期望 11），看上面哪个被跳过"
           [ "$DRVM_OK" -eq 7 ]  || echo "::warning::模块表命中 $DRVM_OK 个（期望 7），看上面哪个被跳过"
-          echo "::notice title=驱动基线::原厂 =y 的 13 个内建（保 get_secureType 等链接期符号）；原厂 =m 的 7 个保持模块交回 .ko（★根治 midas 重复注册 panic★）；QCOM_APR/SOUNDWIRE 仍为 n；techpack 保持 =m"
+          echo "::notice title=驱动基线::原厂 =y 的 $DRV_OK 个内建（保 get_secureType 等链接期符号）；原厂 =m 的 $DRVM_OK 个保持模块交回 .ko（★根治 midas 重复注册 panic★）；强制关闭 $DRV_MUSTOFF；QCOM_APR/SOUNDWIRE 仍为 n；techpack 保持 =m"
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
             if [ ! -d "$BUILD_DIR/drivers/kernelsu" ]; then
