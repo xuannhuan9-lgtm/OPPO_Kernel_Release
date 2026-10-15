@@ -1674,10 +1674,18 @@ jobs:
           #   另有同类的非致命重复：oplus_bsp_ir_core / btpower / oplus_wifismartantenna。
           #   原则（其实就是下面注释早写过的）：原厂 =m 的一律交回 .ko，别自己再编一份。
 
-          # 原厂 defconfig 里就是 =y 的 11 个 + 原厂没有的两项 ⇒ 内建
-          DRV_BUILTIN="QCA_CLD_WLAN UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
+          # ★ A18：内建表 = 正好【原厂 defconfig 里就是 =y】的那 11 个 ★
+          #   原来还多塞了两项，都有问题：
+          #     QTI_POLICY_ENGINE_SENSOR —— 原厂 defconfig 是 "# ... is not set"（原厂根本不用）
+          #        我们却内建。这是【传感器缺失】的头号嫌疑（A30b 实验就是查这个）。
+          #     QCA_CLD_WLAN —— 原厂 config 树里根本没这个符号；原厂 WiFi 走
+          #        /vendor/lib/modules 的 wlan.ko（dmesg: "wlan(O)"，(O)=外部模块）。
+          #        我们内建一份 = 又一份同名驱动重复，而 WiFi 是关键功能，风险大。
+          DRV_BUILTIN="UFF_FINGERPRINT HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
           # ★原厂 defconfig 里是 =m 的 7 个 ⇒ 必须保持模块，交给原厂 .ko★
           DRV_MODULE="BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
+          # ★必须保持【关闭】的（原厂就是关的）—— 内建它们会与 .ko 重复或破坏原有枚举★
+          DRV_MUSTOFF="QTI_POLICY_ENGINE_SENSOR QCA_CLD_WLAN"
           DRV_KCONFIG="$DRV_BUILTIN $DRV_MODULE"   # 仅用于数量核对
 
           echo "===== 驱动基线：按原厂 defconfig 分两类处理（A17 修正）====="
@@ -1701,10 +1709,17 @@ jobs:
               echo "  ⚠ $s 不在这个 Kconfig 树里，跳过"
             fi
           done
-          echo "  内建 $DRV_OK 个（期望 13）/ 模块 $DRVM_OK 个（期望 7）"
+          for s in $DRV_MUSTOFF; do
+            if scripts/config --file out/.config --disable "$s" 2>/dev/null; then
+              echo "  ✓ $s -> 关闭（原厂就是关的）"
+            else
+              echo "  ⚠ $s 关闭失败/不在树里"
+            fi
+          done
+          echo "  内建 $DRV_OK 个（期望 11）/ 模块 $DRVM_OK 个（期望 7）/ 强制关闭 $DRV_MUSTOFF"
           # 只警告不中断：scripts/config 对个别未知符号可能返回非零；
           # 真正的把关在「Configure Kernel 校验」那一步的 =y / =m 断言。
-          [ "$DRV_OK"  -eq 13 ] || echo "::warning::内建表命中 $DRV_OK 个（期望 13），看上面哪个被跳过"
+          [ "$DRV_OK"  -eq 11 ] || echo "::warning::内建表命中 $DRV_OK 个（期望 11），看上面哪个被跳过"
           [ "$DRVM_OK" -eq 7 ]  || echo "::warning::模块表命中 $DRVM_OK 个（期望 7），看上面哪个被跳过"
           echo "::notice title=驱动基线::原厂 =y 的 13 个内建（保 get_secureType 等链接期符号）；原厂 =m 的 7 个保持模块交回 .ko（★根治 midas 重复注册 panic★）；QCOM_APR/SOUNDWIRE 仍为 n；techpack 保持 =m"
 
@@ -2200,7 +2215,7 @@ jobs:
 
           # ★ A17：按原厂 defconfig 的真实值分两类断言 ★
           #   原厂 =y 的必须仍为 y（链接期符号靠它们）
-          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG QCA_CLD_WLAN"
+          DRV_HARD="UFF_FINGERPRINT HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
           DRV_SOFT=""
           #   ★原厂 =m 的 7 个必须为 m★ —— 否则内建一份 + 原厂 .ko 一份 = 同名注册两次，
           #   已实测会让 midas 走错误路径后在定时器中断里空指针 panic（卡第一屏）。
@@ -2234,6 +2249,24 @@ jobs:
             exit 1
           fi
           echo "  OK 原厂 =m 的 7 个驱动保持模块（杜绝同名驱动注册两次；midas panic 的根治点）"
+
+          # ★★★ A18 断言：原厂明确关闭的必须保持关闭 ★★★
+          #   QTI_POLICY_ENGINE_SENSOR：原厂 defconfig 是 "# ... is not set"。
+          #     内建它 = 引入一个原厂不用的驱动 ⇒ 传感器枚举被破坏（A30b 实验的结论）。
+          #   QCA_CLD_WLAN：原厂 config 树里没这个符号，WiFi 走 /vendor 的 wlan.ko。
+          #     内建它 = 与 wlan.ko 同名重复。
+          OFFBAD=""
+          for k in $DRV_MUSTOFF; do
+            if grep -qE "^CONFIG_${k}=[ym]$" out/.config; then OFFBAD="$OFFBAD $k"; fi
+          done
+          if [ -n "$OFFBAD" ]; then
+            echo "::error title=该关的没关::这些原厂就是关闭的，但现在是 y/m：$OFFBAD"
+            echo "  QTI_POLICY_ENGINE_SENSOR 内建会破坏传感器枚举；"
+            echo "  QCA_CLD_WLAN 内建会与原厂 wlan.ko 同名重复。"
+            for k in $OFFBAD; do grep -n "CONFIG_${k}" out/.config || true; done
+            exit 1
+          fi
+          echo "  OK 原厂关闭的 2 项保持关闭（QTI_POLICY_ENGINE_SENSOR / QCA_CLD_WLAN）"
           for s in QCOM_APR SOUNDWIRE; do
             if grep -qE "^CONFIG_${s}=[ym]$" out/.config; then
               echo "::error::$s 不能启用！techpack/audio 自带同名 bus，重复注册 /bus/soundwire 会让 soundwire_init 的 bus_unregister 空指针 -> 卡一屏"
