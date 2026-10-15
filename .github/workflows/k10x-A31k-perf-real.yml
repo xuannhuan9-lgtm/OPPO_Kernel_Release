@@ -2222,6 +2222,9 @@ jobs:
           #   ★原厂 =m 的 7 个必须为 m★ —— 否则内建一份 + 原厂 .ko 一份 = 同名注册两次，
           #   已实测会让 midas 走错误路径后在定时器中断里空指针 panic（卡第一屏）。
           DRV_MUSTMOD="BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
+          # ★必须在本步重新赋值★ —— GitHub 每个 step 是独立 shell，
+          #   上一步赋的 DRV_MUSTOFF 到这里就没了，用它会被 set -u 杀掉（已实测炸一次）。
+          DRV_MUSTOFF="QTI_POLICY_ENGINE_SENSOR QCA_CLD_WLAN"
           # ★ 那些原厂就是 y 的驱动必须仍为 y：pm_suspend / oplus_get_rpm_stats 这些
           #   内建代码在调 get_secureType（OPPO secureguard 提供）。关掉它 -> 链接期
           #   undefined symbol -> 编不出来（A6f 实测就是这个错）。
