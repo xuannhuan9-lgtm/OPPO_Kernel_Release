@@ -1483,33 +1483,28 @@ jobs:
             echo "  解析行上没有 /* —— 安全"
           fi
           echo "::notice title=O3::init/Kconfig 的 -O3 依赖已放开（ARC || ARM64）—— perf 选 bbr+o3 时才会真正生效"
-      # ==========================================================================
-      # ★ A19：为什么关掉 CPU_FREQ_TIMES ——「卡第一屏」的真正根因★
-      #   2026-10-15 从 pstore 拿到崩溃启动的完整调用栈（自下往上）：
-      #     el0_svc → __arm64_sys_finit_module      modprobe 加载模块
-      #       oplus_invoke_syscall                  OPPO 的 syscall 拦截层
-      #         load_module+0x13cc → mutex_lock     模块加载被拖在锁上
-      #           ← 定时器中断打进来 →
-      #           tick_sched_timer → update_process_times
-      #             account_process_tick → irqtime_account_process_tick
-      #               account_system_index_time
-      #                 cpufreq_acct_update_power+0x160/0x1a4
-      #                   midas_record_task_times+0x54 [oplus_bsp_midas]
-      #                     → NULL 解引用 0x4 → Kernel panic
+      # ★ A19/A20：卡第一屏的真正根因与正解（历史记录，别重犯）★
+      #   崩溃调用栈（pstore，自下往上）：
+      #     el0_svc → __arm64_sys_finit_module → oplus_invoke_syscall
+      #       load_module+0x13cc → mutex_lock          ← 模块加载被拖在锁上
+      #         ← 定时器中断打进来 →
+      #         tick_sched_timer → update_process_times → account_process_tick
+      #           irqtime_account_process_tick → account_system_index_time
+      #             cpufreq_acct_update_power+0x160/0x1a4
+      #               midas_record_task_times+0x54 [oplus_bsp_midas] → NULL deref
       #   机制：oplus_bsp_midas.ko 在 init 里先挂 hook、后建全局数据；钩子挂在
-      #     drivers/cpufreq/cpufreq_times.c:151
-      #       trace_android_vh_cpufreq_acct_update_power(cputime, p, state);
-      #   一旦 load_module 在锁上被拖住，窗口内来一发 tick 就走进去，
-      #   而那时它的全局指针还是 NULL ⇒ 空指针 panic ⇒ 卡第一屏（开机 ~4.4s）。
-      #   佐证：同一次抓取里 4 次成功启动，每次都有 midas-pdev 的 -EEXIST，
-      #         但都只是 WARNING 并继续启动；崩溃那次才是 panic
-      #         ⇒ 纯时序竞态，-EEXIST 无害（A17 那个判断是错的）。
-      #   修法：--disable CPU_FREQ_TIMES ⇒ cpufreq_times.c 不编译 ⇒ 那一行
-      #     trace_... 不存在；cputime.c:155/202 的调用点退化成
-      #     include/linux/cpufreq_times.h 里的 static inline 空桩 ⇒ 编译正常、
-      #     hook 永不触发 ⇒ 竞态窗口消失。代价：失去 /proc/uid_time_in_state。
-      #   ★注意★ 本步骤的 run 块已接近 GitHub 的 21000 字符上限
-      #     （按原始 YAML 含缩进算），注释一律写在这里，别再往 run 里加。
+      #     drivers/cpufreq/cpufreq_times.c:151 的 trace_android_vh_cpufreq_acct_update_power
+      #     ⇒ 窗口内来一发 tick 就空指针 panic ⇒ 卡第一屏（开机 ~4.4s）。
+      #   ★A19 的错误尝试★ 曾用 --disable CPU_FREQ_TIMES 来剪掉那个调用点。
+      #     它能治卡第一屏，但【破坏了 kABI】：
+      #       include/linux/sched.h:1050  #ifdef CONFIG_CPU_FREQ_TIMES
+      #                                      u64 *time_in_state; unsigned int max_state;
+      #     关掉 ⇒ task_struct 少 16 字节 ⇒ 后续字段偏移全前移 ⇒ 原厂 .ko 读错位
+      #     ⇒ system_server 崩溃 ⇒ ★软重启循环★（2026-10-15 实测复现）。
+      #   ★A20 的正解★ CONFIG_CPU_FREQ_TIMES 保持 y（布局不变），只在 A20 步骤里
+      #     把 cpufreq_times.c 那一行 trace 调用注释掉 ⇒ hook 永不触发 ⇒ 同样根治，
+      #     且 /proc/uid_time_in_state 功能保留、kABI 完整。
+      #   本步骤下面只做 --enable CPU_FREQ_TIMES 兜底（防止 defconfig 漂移）。
       # ==========================================================================
       - name: Configure Kernel — 生成 .config
         shell: bash
@@ -1750,8 +1745,9 @@ jobs:
 
           # ★ A19：关掉 CPU_FREQ_TIMES，消掉 oplus_bsp_midas.ko 的 hook 调用点
           #   （详因见本步骤上方的 YAML 注释块；这里只留结论）
-          scripts/config --file out/.config --disable CPU_FREQ_TIMES
-          echo "  ✓ CPU_FREQ_TIMES -> n（消掉 midas 的 cpufreq hook 调用点，根治卡第一屏）"
+          scripts/config --file out/.config --enable CPU_FREQ_TIMES
+          echo "  ✓ CPU_FREQ_TIMES -> y（★必须为 y★ 它守卫 task_struct 的 time_in_state/max_state 字段，"
+          echo "     关掉会改结构体布局 = 破坏 kABI = 原厂 .ko 读到错偏移 = system_server 崩溃软重启循环）"
           # 只警告不中断：scripts/config 对个别未知符号可能返回非零；
           # 真正的把关在「Configure Kernel 校验」那一步的 =y / =m 断言。
           [ "$DRV_OK"  -eq 11 ] || echo "::warning::内建表命中 $DRV_OK 个（期望 11），看上面哪个被跳过"
@@ -2013,6 +2009,20 @@ jobs:
           done
           echo "::notice title=签名::已关 MODULE_SIG/MODVERSIONS/KEXEC_SIG/IMA/EVM/INTEGRITY_SIGNATURE（真正的签名校验）；X509/PKCS7/非对称密钥/信任密钥环保持基线值；DM_VERITY/FS_VERITY/FS_ENCRYPTION/KEYS 保持不动"
 
+      # ★ A19 的教训（务必记住）★
+      #   CONFIG_CPU_FREQ_TIMES 守卫 task_struct 的字段（include/linux/sched.h:1050）：
+      #       #ifdef CONFIG_CPU_FREQ_TIMES
+      #           u64          *time_in_state;
+      #           unsigned int  max_state;
+      #       #endif
+      #   关掉它 => 这两个字段消失 => 后面字段偏移前移 16 字节 => ★kABI 破坏★
+      #   => 所有原厂 .ko（midas/btpower/techpack/wlan）按含字段的布局编译，
+      #      读 task_struct 时错位 => system_server 崩溃 => ★软重启循环★
+      #   （2026-10-15 实测复现：刷了关掉它的 A19 内核，能开机但一直软重启）
+      #   ★正解：保持 y，只在 cpufreq_times.c 里注释掉那一行 trace 调用（见 A20 步骤）★
+      #   ★同理★ CFS_BANDWIDTH / CGROUP_PIDS 也是改结构体大小，绝不能开。
+      #   ★通用原则★ 凡是出现在 include/linux/sched.h 等核心结构体 #ifdef 里的
+      #     CONFIG_*，一律不许动 —— 动了就是 kABI 破坏。
       - name: Configure Kernel — 校验 + olddefconfig
         shell: bash
         run: |
@@ -2116,9 +2126,7 @@ jobs:
             || { echo "::error title=配置::主 olddefconfig 之后 CONFIG_ARM64 不是 y（变成 x86 了）"; head -2 out/.config; exit 1; }
           echo "  ✓ 主 olddefconfig 之后仍是 arm64"
 
-          # ============================================================
           # ★第 23 轮 · 第二层防线：平台符号残废检测★
-          # ------------------------------------------------------------
           # 第一层（拷完 defconfig 立刻 olddefconfig）治根；这一层兜底。
           # run#14 编出来的内核 ARCH_QCOM=n（GPU/SCM/iommu 全丢），但
           # make 完全不报错、LD vmlinux.o 照样成功 —— 只有靠这种硬断言才拦得住。
@@ -2126,9 +2134,7 @@ jobs:
           # ============================================================
           echo "===== 平台符号完整性检测（第 23 轮）====="
           PLAT_MISSING=""
-          # ★第 28 轮修正★ run#20 实测 12 项里 11 项全中，只有 PINCTRL_QCOM 报"无这一行"。
-          # 查证：drivers/pinctrl/qcom/Kconfig:4 是 `config PINCTRL_MSM`，
-          #       PINCTRL_QCOM 这个符号【根本不存在】—— 是我断言写错了，不是配置残废。
+          # （第28轮记：PINCTRL_QCOM 这符号不存在，drivers/pinctrl/qcom 用的是 PINCTRL_MSM）
           for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS QCOM_SMEM \
                    MSM_SUBSYSTEM_RESTART MSM_SERVICE_LOCATOR ARM_SMMU \
                    COMMON_CLK_QCOM PINCTRL_MSM PINCTRL_HOLI QCOM_GLINK ION_MSM_HEAPS; do
@@ -2308,15 +2314,12 @@ jobs:
 
           # ★★★ A19 断言：CPU_FREQ_TIMES 必须为 n ★★★
           #   olddefconfig 有可能把它拉回 y（它有依赖），所以必须再确认一次。
-          if grep -qE '^CONFIG_CPU_FREQ_TIMES=[ym]$' out/.config; then
-            echo "::error title=卡第一屏会复发::CONFIG_CPU_FREQ_TIMES 又变成 y/m 了！"
-            echo "  它会让 cpufreq_times.c 被编进来，其中的"
-            echo "  trace_android_vh_cpufreq_acct_update_power() 就是 oplus_bsp_midas.ko 挂 hook 的地方；"
-            echo "  模块 init 的竞态窗口内来个定时器 tick 就会空指针 panic（卡第一屏）。"
+          if ! grep -qE '^CONFIG_CPU_FREQ_TIMES=y$' out/.config; then
+            echo "::error title=会破坏 kABI::CPU_FREQ_TIMES 必须为 y（详见本步骤上方 YAML 注释）"
             grep -n 'CONFIG_CPU_FREQ_TIMES' out/.config || true
             exit 1
           fi
-          echo "  OK CPU_FREQ_TIMES=n（midas 的 cpufreq hook 调用点已移除，卡第一屏的竞态窗口消失）"
+          echo "  OK CPU_FREQ_TIMES=y（task_struct 布局完整，kABI 未破坏）"
           for s in QCOM_APR SOUNDWIRE; do
             if grep -qE "^CONFIG_${s}=[ym]$" out/.config; then
               echo "::error::$s 不能启用！techpack/audio 自带同名 bus，重复注册 /bus/soundwire 会让 soundwire_init 的 bus_unregister 空指针 -> 卡一屏"
@@ -2353,8 +2356,7 @@ jobs:
             [ -f "$f" ] || continue
             grep -cE '^[[:space:]]*export CONFIG_[A-Z0-9_]+=y[[:space:]]*$' "$f" || true
           done ; } | awk '{s+=$1} END{print s+0}')
-          # 注意：源码树里原生就有 $YTOT 个 export CONFIG_x=y（例如 camera 的 SPECTRA_ISP=y），
-          # 那是原样、不动它。A6e 只要求「第9步没有去动 conf」——而 A6e 的第9步本来就只统计。
+          # 源码树原生就有 $YTOT 个 export CONFIG_x=y（如 camera 的 SPECTRA_ISP=y），原样不动。
           echo "  techpack 全树: =m $MTOT 个 / =y $YTOT 个（原生值，A6e 一个字都没改）"
           [ "$MTOT" -gt 100 ] || { echo "::error::techpack 的 =m 只有 $MTOT 个，conf 被动过了"; exit 1; }
           [ "$YTOT" -ge 50 ] || { echo "::error::techpack 的 =y 只有 $YTOT 个，conf 被动过了"; exit 1; }
@@ -2367,6 +2369,53 @@ jobs:
           done
           echo "  OK 声卡与 ADSP 关键件（14 个）全部保持 =m"
           echo "::notice title=原厂模块路线(A6e)::techpack 全树 =m 共 $MTOT 个、=y 共 $YTOT 个；声卡/ADSP 关键件全部 =m，交给 same_magic 放行后的原厂 .ko"
+
+      # ==========================================================================
+      # ★ A20：剪掉 oplus_bsp_midas.ko 挂的 cpufreq vendor hook 调用点★
+      #   为什么不用 A19 那个「关掉 CONFIG_CPU_FREQ_TIMES」的办法：
+      #     include/linux/sched.h:1050-1053
+      #       #ifdef CONFIG_CPU_FREQ_TIMES
+      #           u64          *time_in_state;
+      #           unsigned int  max_state;
+      #       #endif
+      #     这两个字段被配置守卫 ⇒ 关掉配置会让 task_struct 变短 16 字节 ⇒
+      #     后面所有字段偏移前移 ⇒ ★kABI 破坏★ ⇒ 所有原厂 .ko（midas/btpower/
+      #     techpack/wlan）按含字段的布局编译，读 task_struct 时错位 ⇒
+      #     system_server 崩溃 ⇒ ★软重启循环★（A19 实测就是这个后果）。
+      #   正解：CONFIG_CPU_FREQ_TIMES 保持 y（布局不变），只在源码里把
+      #     drivers/cpufreq/cpufreq_times.c 中那一行
+      #       trace_android_vh_cpufreq_acct_update_power(cputime, p, state);
+      #     注释掉。效果与 A19 相同（hook 永不触发 ⇒ midas 不再被调用 ⇒
+      #     卡第一屏消失），但 /proc/uid_time_in_state 功能保留、kABI 完整。
+      # ==========================================================================
+      - name: A20 · 剪掉 midas 挂的 cpufreq vendor hook 调用点（保住 kABI）
+        if: ${{ inputs.enable_ksu }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR"
+
+          F=drivers/cpufreq/cpufreq_times.c
+          test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
+
+          echo "===== 改之前 ====="
+          grep -n 'cpufreq_acct_update_power' "$F" || true
+
+          N=$(grep -c '^[[:space:]]*trace_android_vh_cpufreq_acct_update_power' "$F" || true)
+          [ "$N" = "1" ] || { echo "::error::期望恰好 1 处 trace 调用，实际 $N 处"; exit 1; }
+
+          # ★用 GNU sed，不用 python heredoc★ —— YAML 的 run 块会让 heredoc 内容整体
+          #   缩进，python 会报 IndentationError（已踩过这个坑）。
+          sed -i 's|^\([[:space:]]*\)trace_android_vh_cpufreq_acct_update_power(cputime, p, state);|\1/* K10x A20: oplus_bsp_midas.ko 在 init 里先挂这个 hook、后建全局数据，模块加载窗口内来一发 tick 就会在 midas_record_task_times 里空指针 panic（开机 ~4.4s => 卡第一屏）。midas 在 tick 路径上只有这一个 hook，剪掉即可根治。注意：绝不能改关 CONFIG_CPU_FREQ_TIMES —— 它守卫 task_struct 的 time_in_state/max_state，关掉破坏 kABI，原厂 .ko 全部读错位 => 软重启循环。 */\n\1/* trace_android_vh_cpufreq_acct_update_power(cputime, p, state); */|' "$F"
+
+          echo "===== 改之后 ====="
+          grep -n 'cpufreq_acct_update_power' "$F" || true
+
+          R=$(grep -c '^[[:space:]]*trace_android_vh_cpufreq_acct_update_power' "$F" || true)
+          [ "$R" = "0" ] || { echo "::error::还有 $R 处生效中的 trace 调用"; exit 1; }
+          grep -q 'trace_android_vh_cpufreq_acct_update_power(cputime, p, state); \*/' "$F"             || { echo "::error::注释没写进去"; exit 1; }
+          echo "  OK 那一行已注释；CONFIG_CPU_FREQ_TIMES 仍为 y（kABI 完整）"
+          echo "::notice title=A20::midas 的 cpufreq hook 调用点已剪掉（tick 路径上它只有这一个）—— 卡第一屏根治，且未动 task_struct 布局"
 
       - name: Configure Kernel — 对比 defconfig（诊断，不阻塞）
         shell: bash
