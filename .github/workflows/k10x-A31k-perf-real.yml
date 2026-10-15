@@ -1949,7 +1949,7 @@ jobs:
           else
             echo "  开机提速未启用（perf=${{ inputs.perf }}）"
           fi
-          echo "::notice title=性能::perf=${{ inputs.perf }} / keep_selinux_hide=${{ inputs.keep_selinux_hide }}｜本版=驱动基线（20 个全内建）+ fsync 补丁（无驱动按原厂、无 fast）"
+          echo "::notice title=性能::perf=${{ inputs.perf }} / keep_selinux_hide=${{ inputs.keep_selinux_hide }}｜驱动按原厂三类分治（=y 内建 / =m 交回 .ko / 关闭原厂不用的）；A19 已关 CPU_FREQ_TIMES 根治 midas 卡第一屏"
 
       - name: 容器加速 · Droidspaces/UFW/Fail2ban 网络项（原厂缺的那些）
         shell: bash
