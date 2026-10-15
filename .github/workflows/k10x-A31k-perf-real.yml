@@ -1659,22 +1659,54 @@ jobs:
           echo "  CONFIG_DEFAULT_TCP_CONG = $(grep -E '^CONFIG_DEFAULT_TCP_CONG=' out/.config | cut -d= -f2)"
           echo "::notice title=性能优化::O3=$(scripts/config --file out/.config --state CC_OPTIMIZE_FOR_PERFORMANCE_O3) BBR=$(scripts/config --file out/.config --state TCP_CONG_BBR) FQ=$(scripts/config --file out/.config --state NET_SCH_FQ) FQ_CODEL=$(scripts/config --file out/.config --state NET_SCH_FQ_CODEL) DEBUG_INFO=$(scripts/config --file out/.config --state DEBUG_INFO)"
 
-          DRV_KCONFIG="QCA_CLD_WLAN UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
-          echo "===== 基线：20 个 OPPO 驱动内建（A26/A27 行为，wifi/蓝牙/红外都内建） ====="
-          echo "  原则：原厂值 =m 的一律交回 /vendor/lib/modules/5.4-gki 的 .ko；原厂根本没编的关掉。"
-          echo "        自己再内建一份 = 同名驱动注册两次，而且比原厂 .ko 更早 probe（会先抢 GPIO/i2c/pinctrl）。"
-          echo "        实测：内建后 oplus_bsp_ir_core / kookong_ir_spi / btpower / bt_fm_slim / rdbg 这些原厂 .ko 就没起来。"
+          # ★★★ A17 修正：按【原厂 defconfig 的真实值】分成两张表 ★★★
+          #   起因（2026-10-15 定位到根因）：原来这里只有一张 20 个的表，一律 --enable，
+          #   把 7 个【原厂本来是 =m】的驱动也强制内建了。于是内核里内建一份、
+          #   原厂 /vendor/lib/modules 的 .ko 又被 modprobe 加载一份 ⇒ 同名驱动注册两次。
+          #   实测后果（pstore 里有完整 panic）：
+          #     [4.410502] kobject_add_internal failed for midas-pdev with -EEXIST
+          #     [4.412681] pc : midas_record_task_times+0x140/0x354 [oplus_bsp_midas]
+          #     [4.442836] Kernel panic - not syncing: Fatal exception in interrupt
+          #   midas_dev_init 注册 platform_device "midas-pdev" 拿到 -EEXIST(rc=-17)，
+          #   模块初始化失败，但它的 cpufreq 计费钩子已经挂上；下一个定时器 tick
+          #   进来就访问未初始化指针(偏移 0x4) ⇒ 空指针 ⇒ panic ⇒ 卡第一屏。
+          #   同时这解释了【间歇性】：tick 若晚于模块初始化完成就不崩 —— 纯竞态。
+          #   另有同类的非致命重复：oplus_bsp_ir_core / btpower / oplus_wifismartantenna。
+          #   原则（其实就是下面注释早写过的）：原厂 =m 的一律交回 .ko，别自己再编一份。
+
+          # 原厂 defconfig 里就是 =y 的 11 个 + 原厂没有的两项 ⇒ 内建
+          DRV_BUILTIN="QCA_CLD_WLAN UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG"
+          # ★原厂 defconfig 里是 =m 的 7 个 ⇒ 必须保持模块，交给原厂 .ko★
+          DRV_MODULE="BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
+          DRV_KCONFIG="$DRV_BUILTIN $DRV_MODULE"   # 仅用于数量核对
+
+          echo "===== 驱动基线：按原厂 defconfig 分两类处理（A17 修正）====="
+          echo "  原则：原厂 =y 的继续内建；原厂 =m 的必须交回 /vendor/lib/modules 的 .ko。"
+          echo "        自己再内建一份 = 同名驱动注册两次 = midas 那种空的指针 panic。"
           DRV_OK=0
-          for s in $DRV_KCONFIG; do
+          for s in $DRV_BUILTIN; do
             if scripts/config --file out/.config --enable "$s" 2>/dev/null; then
-              echo "  ✓ $s -> y"
+              echo "  ✓ $s -> y（原厂就是 y）"
               DRV_OK=$((DRV_OK+1))
             else
               echo "  ⚠ $s 不在这个 Kconfig 树里，跳过"
             fi
           done
-          echo "  已处理 $DRV_OK / 11 个（只有原厂本来就 =y 的）"
-          echo "::notice title=驱动基线::20 个驱动全部 --enable 内建（保 get_secureType 等链接期符号）；QCOM_APR/SOUNDWIRE 仍为 n；techpack 保持 =m"
+          DRVM_OK=0
+          for s in $DRV_MODULE; do
+            if scripts/config --file out/.config --module "$s" 2>/dev/null; then
+              echo "  ✓ $s -> m（原厂就是 m，交给 .ko）"
+              DRVM_OK=$((DRVM_OK+1))
+            else
+              echo "  ⚠ $s 不在这个 Kconfig 树里，跳过"
+            fi
+          done
+          echo "  内建 $DRV_OK 个（期望 13）/ 模块 $DRVM_OK 个（期望 7）"
+          # 只警告不中断：scripts/config 对个别未知符号可能返回非零；
+          # 真正的把关在「Configure Kernel 校验」那一步的 =y / =m 断言。
+          [ "$DRV_OK"  -eq 13 ] || echo "::warning::内建表命中 $DRV_OK 个（期望 13），看上面哪个被跳过"
+          [ "$DRVM_OK" -eq 7 ]  || echo "::warning::模块表命中 $DRVM_OK 个（期望 7），看上面哪个被跳过"
+          echo "::notice title=驱动基线::原厂 =y 的 13 个内建（保 get_secureType 等链接期符号）；原厂 =m 的 7 个保持模块交回 .ko（★根治 midas 重复注册 panic★）；QCOM_APR/SOUNDWIRE 仍为 n；techpack 保持 =m"
 
           if [ "${{ inputs.enable_ksu }}" = "true" ]; then
             if [ ! -d "$BUILD_DIR/drivers/kernelsu" ]; then
@@ -2166,13 +2198,17 @@ jobs:
           fi
           echo "::notice title=配置最终核对::olddefconfig 之后 Droidspaces 必需项 + NoMount + 卡二屏三项全部符合预期"
 
-          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG QCA_CLD_WLAN"
-          DRV_SOFT="OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
-          # ★ 这 20 个驱动必须为 y：pm_suspend / oplus_get_rpm_stats 这些内建代码
-          #   在调 get_secureType（OPPO secureguard 提供）。关掉它 -> 链接期
+          # ★ A17：按原厂 defconfig 的真实值分两类断言 ★
+          #   原厂 =y 的必须仍为 y（链接期符号靠它们）
+          DRV_HARD="UFF_FINGERPRINT QTI_POLICY_ENGINE_SENSOR HORAE_THERMAL_SHELL OPLUS_FEATURE_CDT OPLUS_KERNEL_SECURE_FEATURE OPLUS_KERNEL_SECURE_GUARD OPLUS_KERNEL_SECURE_KEVENTUPLOAD OPLUS_SECURE OPLUS_SECURE_COMMON OPLUS_SECURE_QCOM OPLUS_FEATURE_MM_FEEDBACK OPLUS_FEATURE_SELINUX_CONTROL_LOG QCA_CLD_WLAN"
+          DRV_SOFT=""
+          #   ★原厂 =m 的 7 个必须为 m★ —— 否则内建一份 + 原厂 .ko 一份 = 同名注册两次，
+          #   已实测会让 midas 走错误路径后在定时器中断里空指针 panic（卡第一屏）。
+          DRV_MUSTMOD="BTFM_SLIM MSM_BT_POWER MSM_RDBG OPLUS_FEATURE_MIDAS_GKI OPLUS_FEATURE_WIFI_SMARTANTENNA OPLUS_SENSOR_CONSUMER_IR_CORE OPLUS_SENSOR_CONSUMER_IR_QC"
+          # ★ 那些原厂就是 y 的驱动必须仍为 y：pm_suspend / oplus_get_rpm_stats 这些
+          #   内建代码在调 get_secureType（OPPO secureguard 提供）。关掉它 -> 链接期
           #   undefined symbol -> 编不出来（A6f 实测就是这个错）。
-          # ★ 变量只用本步上面刚赋过的 DRV_HARD + DRV_SOFT —— DRV_KCONFIG 是
-          #   上一步赋的，GitHub 每个 step 独立 shell，用它会被 set -u 杀掉（已实测）。
+          # ★ 变量只用本步上面刚赋过的 —— 上一步赋的会被 set -u 杀掉（已实测）。
           DMISS=""
           for k in $DRV_HARD $DRV_SOFT; do
             grep -q "^CONFIG_${k}=y" out/.config || DMISS="$DMISS $k"
@@ -2181,7 +2217,23 @@ jobs:
             echo "::error::olddefconfig 之后这些驱动没生效：$DMISS（缺了 get_secureType 会 undefined）"
             exit 1
           fi
-          echo "  OK 20 个驱动在 olddefconfig 之后仍为 y（get_secureType 等符号链接期存在）"
+          echo "  OK 原厂 =y 的 13 个驱动在 olddefconfig 之后仍为 y（get_secureType 等符号链接期存在）"
+
+          # ★★★ A17 核心断言：原厂 =m 的 7 个必须保持 m ★★★
+          #   若这里变成 y，就会「内建一份 + 原厂 .ko 一份」⇒ 同名驱动注册两次
+          #   ⇒ midas_dev_init 拿到 -EEXIST 后走错误路径，定时器中断里空指针 panic。
+          MMISS=""
+          for k in $DRV_MUSTMOD; do
+            grep -qE "^CONFIG_${k}=m$" out/.config || MMISS="$MMISS $k"
+          done
+          if [ -n "$MMISS" ]; then
+            echo "::error title=重复注册风险::这些驱动必须是 m（原厂就是 m，交给 .ko），但现在是别的值：$MMISS"
+            echo "  它们若被内建，会与原厂 /vendor/lib/modules 的同名 .ko 重复注册；"
+            echo "  已实测 midas 会因此在定时器中断里空指针 panic（卡第一屏）。"
+            for k in $MMISS; do grep -n "CONFIG_${k}" out/.config || echo "    (CONFIG_${k} 不在 .config)"; done
+            exit 1
+          fi
+          echo "  OK 原厂 =m 的 7 个驱动保持模块（杜绝同名驱动注册两次；midas panic 的根治点）"
           for s in QCOM_APR SOUNDWIRE; do
             if grep -qE "^CONFIG_${s}=[ym]$" out/.config; then
               echo "::error::$s 不能启用！techpack/audio 自带同名 bus，重复注册 /bus/soundwire 会让 soundwire_init 的 bus_unregister 空指针 -> 卡一屏"
