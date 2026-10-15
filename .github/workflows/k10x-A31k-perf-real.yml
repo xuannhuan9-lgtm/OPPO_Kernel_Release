@@ -1719,6 +1719,40 @@ jobs:
             fi
           done
           echo "  内建 $DRV_OK 个（期望 11）/ 模块 $DRVM_OK 个（期望 7）/ 强制关闭 $DRV_MUSTOFF"
+
+          # ★★★ A19：关掉 CPU_FREQ_TIMES —— 根治「卡第一屏」的真正原因 ★★★
+          #   2026-10-15 从 pstore 拿到崩溃启动的完整调用栈（自下往上）：
+          #     el0_svc → __arm64_sys_finit_module        （modprobe 加载模块）
+          #       oplus_invoke_syscall                    （OPPO 的 syscall 拦截层）
+          #         load_module+0x13cc → mutex_lock       （模块加载在等锁）
+          #           ← 此时定时器中断打进来 →
+          #           tick_sched_timer → update_process_times
+          #             account_process_tick → irqtime_account_process_tick
+          #               account_system_index_time
+          #                 ★cpufreq_acct_update_power+0x160/0x1a4★
+          #                   ★midas_record_task_times+0x54 [oplus_bsp_midas]★
+          #                     → NULL 解引用 0x4 → Kernel panic
+          #
+          #   机制：oplus_bsp_midas.ko 在 init 里【先挂 hook、后建全局数据】。
+          #   钩子挂在 drivers/cpufreq/cpufreq_times.c:151 的
+          #     trace_android_vh_cpufreq_acct_update_power(cputime, p, state);
+          #   一旦 load_module 在锁上被拖住，窗口内来个定时器 tick 就会走进去，
+          #   而那时它的全局指针还是 NULL ⇒ 空指针 panic ⇒ 卡第一屏。
+          #
+          #   证据（同一个 -EEXIST 在两次启动里的不同结局）：
+          #     成功启动 4.442s: midas-pdev -EEXIST → 只是 WARNING，继续启动
+          #     崩溃启动 4.424s: 同一个模块的 midas_record_task_times → panic
+          #   ⇒ 纯粹是时序竞态，与 midas-pdev 的 -EEXIST 无关
+          #     （A17 那个判断是错的，-EEXIST 每次启动都有、且无害）。
+          #
+          #   修法：关掉 CONFIG_CPU_FREQ_TIMES。该文件由
+          #     obj-$(CONFIG_CPU_FREQ_TIMES) += cpufreq_times.o
+          #   控制；关掉后 cpufreq_times.c 不编译，那一行 trace_... 就不存在，
+          #   而 kernel/sched/cputime.c 的调用点会退化成 include/linux/cpufreq_times.h
+          #   里的 static inline 空桩 ⇒ 编译正常、hook 永不触发 ⇒ 竞态窗口消失。
+          #   代价：失去 /proc/uid_time_in_state（CPU 频率统计），影响极低。
+          scripts/config --file out/.config --disable CPU_FREQ_TIMES
+          echo "  ✓ CPU_FREQ_TIMES -> n（消掉 midas 的 cpufreq hook 调用点，根治卡第一屏）"
           # 只警告不中断：scripts/config 对个别未知符号可能返回非零；
           # 真正的把关在「Configure Kernel 校验」那一步的 =y / =m 断言。
           [ "$DRV_OK"  -eq 11 ] || echo "::warning::内建表命中 $DRV_OK 个（期望 11），看上面哪个被跳过"
@@ -2272,6 +2306,18 @@ jobs:
             exit 1
           fi
           echo "  OK 原厂关闭的 2 项保持关闭（QTI_POLICY_ENGINE_SENSOR / QCA_CLD_WLAN）"
+
+          # ★★★ A19 断言：CPU_FREQ_TIMES 必须为 n ★★★
+          #   olddefconfig 有可能把它拉回 y（它有依赖），所以必须再确认一次。
+          if grep -qE '^CONFIG_CPU_FREQ_TIMES=[ym]$' out/.config; then
+            echo "::error title=卡第一屏会复发::CONFIG_CPU_FREQ_TIMES 又变成 y/m 了！"
+            echo "  它会让 cpufreq_times.c 被编进来，其中的"
+            echo "  trace_android_vh_cpufreq_acct_update_power() 就是 oplus_bsp_midas.ko 挂 hook 的地方；"
+            echo "  模块 init 的竞态窗口内来个定时器 tick 就会空指针 panic（卡第一屏）。"
+            grep -n 'CONFIG_CPU_FREQ_TIMES' out/.config || true
+            exit 1
+          fi
+          echo "  OK CPU_FREQ_TIMES=n（midas 的 cpufreq hook 调用点已移除，卡第一屏的竞态窗口消失）"
           for s in QCOM_APR SOUNDWIRE; do
             if grep -qE "^CONFIG_${s}=[ym]$" out/.config; then
               echo "::error::$s 不能启用！techpack/audio 自带同名 bus，重复注册 /bus/soundwire 会让 soundwire_init 的 bus_unregister 空指针 -> 卡一屏"
