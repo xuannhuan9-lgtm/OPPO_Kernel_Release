@@ -615,6 +615,22 @@ jobs:
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
           cd KernelSU
           git checkout builtin
+
+          # ★★★ 把 KSU 钉死到已实测可编过的 commit ★★★
+          #   上游 builtin 在 2026-10-15 09:15 (a233901386) 与 10:00 (c95d6e2c)
+          #   推的「动态多管理器」提交是【坏合并】，编译必失败：
+          #     kernel/include/uapi/supercall.h:230:47:
+          #         error: use of undeclared identifier 'ksu_manager_cmd'
+          #   因为该文件里 KSU_IOCTL_KPM 被定义了两次：
+          #     第 230 行  KSU_IOCTL_KPM = _IOWR('K', 106, ksu_manager_cmd)
+          #     第 232 行  KSU_IOCTL_KPM = _IOC(_IOC_READ|_IOC_WRITE, 'K', 200, 0)
+          #   重复的枚举名 + 未解析的类型，任何人拿 HEAD 都编不过。
+          #   2d1de629 是产出已验证 A31k（PASS=121 / FAIL=0）的那个 commit，
+          #   钉住它既保证可编，也不再受上游后续改动影响。
+          KSU_PIN=2d1de629d4204d25cc0c8927b959d9135d9781f4
+          git checkout -B builtin "$KSU_PIN"
+          test "$(git rev-parse HEAD)" = "$KSU_PIN" \
+            || { echo "::error::KSU 没钉到 $KSU_PIN，实际 $(git rev-parse HEAD)"; exit 1; }
           echo "===== SukiSU Ultra ====="
           echo "HEAD     = $(git rev-parse HEAD)"
           echo "分支     = $(git rev-parse --abbrev-ref HEAD)"
@@ -630,6 +646,16 @@ jobs:
           test -d kernel/kpm || { echo "::error::builtin 分支里没有 kernel/kpm，KPM 会丢"; exit 1; }
           grep -q '^config KPM' kernel/Kconfig || { echo "::error::Kconfig 里没有 config KPM"; exit 1; }
           echo "KPM 源码: $(ls kernel/kpm/ | tr '\n' ' ')"
+
+          # 防御：supercall.h 里 KSU_IOCTL_KPM 必须只定义一次
+          # （上游 2026-10-15 的动态多管理器合并把它定义了两次，直接编不过）
+          KPM_IOCTL_N=$(grep -c 'KSU_IOCTL_KPM' kernel/include/uapi/supercall.h || true)
+          [ "$KPM_IOCTL_N" = "1" ] || {
+            echo "::error::supercall.h 里 KSU_IOCTL_KPM 有 $KPM_IOCTL_N 处（应为 1），上游 UAPI 出现重复定义"
+            grep -n 'KSU_IOCTL_KPM' kernel/include/uapi/supercall.h || true
+            exit 1
+          }
+          echo "✓ supercall.h 的 KSU_IOCTL_KPM 定义唯一（$KPM_IOCTL_N 处）"
 
           N=$(grep -c 'SUSFS' kernel/supercall/dispatch.c || true)
           [ "$N" -ge 20 ] || { echo "::error::dispatch.c 里 susfs 只有 $N 处，这不是 builtin 分支"; exit 1; }
