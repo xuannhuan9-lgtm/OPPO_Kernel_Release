@@ -1958,7 +1958,7 @@ jobs:
           else
             echo "  开机提速未启用（perf=${{ inputs.perf }}）"
           fi
-          echo "::notice title=性能::perf=${{ inputs.perf }} / keep_selinux_hide=${{ inputs.keep_selinux_hide }}｜驱动按原厂三类分治（=y 内建 / =m 交回 .ko / 关闭原厂不用的）；A19 已关 CPU_FREQ_TIMES 根治 midas 卡第一屏"
+          echo "::notice title=性能::perf=${{ inputs.perf }} / keep_selinux_hide=${{ inputs.keep_selinux_hide }}｜驱动按原厂三类分治（=y 内建 / =m 交回 .ko / 关闭原厂不用的）；A20 已在 cpufreq_times.c 剪掉 midas 的 hook 调用点；A21 保住 CPU_FREQ_TIMES 与 SCHEDSTATS=y（kABI 红线）"
 
       - name: 容器加速 · Droidspaces/UFW/Fail2ban 网络项（原厂缺的那些）
         shell: bash
@@ -2526,7 +2526,10 @@ jobs:
               print("  => 正解：照原厂保持 =y，改在源码里动那一处代码（参考 A20 的做法）")
               sys.exit(1)
 
-          print("  OK 已关的 %d 个符号都不守卫核心结构体（kABI 安全）" % len(danger))
+          n = len(danger)
+          print("  OK 已关的 %d 个符号都不守卫核心结构体（kABI 安全）" % n)
+          print("::notice title=kABI 审计::通过 —— 已关的 %d 个符号都不守卫核心结构体；"
+                "CPU_FREQ_TIMES 与 SCHEDSTATS 均保持原厂 =y，task_struct 布局与原厂一致" % n)
           PYEOF
           echo "  ✓ kABI 审计通过"
 
