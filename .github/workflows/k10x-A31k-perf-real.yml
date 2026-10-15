@@ -95,8 +95,8 @@ jobs:
       RANCE_DEFCONFIG_MIRROR: "https://api.github.com/repos/Rancemxn/android_kernel_oppo_sm6375/contents/arch/arm64/configs/sm6375_defconfig?ref=main"
       RANCE_DEFCONFIG_SHA256: "540f7b240a998f47"
       RANCE_DEFCONFIG_SIZE: "190483"
-      SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_5.4.patch
-      SUSFS_PATCH_MIRROR: https://cdn.jsdelivr.net/gh/JackA1ltman/NonGKI_Kernel_Build_2nd@mainline/Patches/Patch/susfs_patch_to_5.4.patch
+      SUSFS_PATCH_URL: https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/40b190d46080085b9bf7c67233ae1dc3cad5edc8/Patches/Patch/susfs_patch_to_5.4.patch
+      SUSFS_PATCH_MIRROR: https://cdn.jsdelivr.net/gh/JackA1ltman/NonGKI_Kernel_Build_2nd@40b190d46080085b9bf7c67233ae1dc3cad5edc8/Patches/Patch/susfs_patch_to_5.4.patch
       SUSFS_PATCH_SHA256: 1c7aa8fcd81f2f7b
       SUSFS_PATCH_SIZE: "143563"
 
