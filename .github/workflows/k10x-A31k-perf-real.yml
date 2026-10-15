@@ -604,6 +604,49 @@ jobs:
           test -x "$T/gcc93/bin/aarch64-buildroot-linux-gnu-gcc"
           test -x "$T/gcc32/bin/arm-linux-androideabi-gcc"
 
+      # ==========================================================================
+      # ★ A22：KernelSU 上游 sepol 自死锁 ——「装了模块后随机卡第一屏」的真因 ★
+      #   panic 现场（pstore 实证）：全 8 个 CPU 都卡在
+      #     avc_compute_av+0x60 -> security_compute_av -> _raw_read_lock(policy_rwlock)
+      #     -> queued_spin_lock_slowpath
+      #   并且 Tainted 带 L（TAINT_SOFTLOCKUP）—— 先 soft lockup，再看门狗咬。
+      #   8 个 CPU 的 x0 是同一个地址（同一把 policy_rwlock），说明没人释放它。
+      #
+      #   根因在 kernel/selinux/rules.c，两个函数都有：
+      #     apply_kernelsu_rules()  —— 开机时 ksud 必调（KSU 内建规则）
+      #     handle_sepolicy()       —— 模块 sepolicy.rule 注入路径
+      #     （两者在 5.10/5.4 的 #if/#else 里各有一份，5.4 走 #else）
+      #       write_lock(lock);                                    // 拿写锁
+      #       preempt_enable();
+      #       sched_setscheduler_nocheck(current, 1, &new_param);   // <= 致命
+      #       ...实际工作...
+      #       sched_setscheduler_nocheck(current, old_policy, &old_param);
+      #       preempt_disable();
+      #       write_unlock(lock);
+      #   内核侧 kernel/sched/core.c：
+      #     _sched_setscheduler(p, policy, param, check)
+      #         -> __sched_setscheduler(p, &attr, check, TRUE)   // user 恒为 true
+      #            if (user) retval = security_task_setscheduler(p);
+      #   => 持写锁期间触发 SELinux 检查 => avc_has_perm
+      #      => 【AVC 缓存未命中时】avc_compute_av -> security_compute_av
+      #         -> read_lock(同一把 policy_rwlock) => 同 CPU 自死锁
+      #   => 写锁永不释放 => 全系统 AVC 饿死 => 看门狗咬。
+      #   注意 sched_setscheduler_nocheck 只跳过「属主/capability」检查，LSM 检查
+      #   照样跑 —— 所以缓存命中不炸、未命中才炸 => 间歇性；且
+      #   apply_kernelsu_rules 每次开机都跑 => 不装模块也可能偶发。
+      #
+      #   修法：删掉全部 4 处调用（两函数各 2 处），并删掉随之未使用的三行声明
+      #     （int old_policy / struct sched_param old_param / new_param）和那句
+      #     "// HACK: raise priority..." 注释 —— 否则 -Wunused-variable 可能挂编译。
+      #   防迁移/防抢占的目的上面已由
+      #     set_cpus_allowed_ptr(current, cpumask_of(raw_smp_processor_id()))
+      #   达成，删掉是安全的。
+      #
+      #   已做验证（在真实 rules.c 上抽 A22 段端到端执行）：
+      #     退出码 0；真调用残留 0；未使用声明残留 0；
+      #     apply_kernelsu_rules_fn / handle_sepolicy_fn 调用都保留；
+      #     write_lock(lock)/write_unlock(lock) 仍配对 2:2。
+      # ==========================================================================
       - name: Integrate SukiSU Ultra (builtin)
         shell: bash
         if: ${{ inputs.enable_ksu }}
@@ -638,39 +681,12 @@ jobs:
           echo "分支     = $(git rev-parse --abbrev-ref HEAD)"
           echo "提交数   = $(git rev-list --count HEAD)"
           echo "最近提交 = $(git log -1 --format='%ci %s')"
-          # ================= ★A22：修 KernelSU 上游的 sepol 自死锁 bug★ =================
-          # 症状（2026-10-16 pstore 实证）：装了带 sepolicy.rule 的模块后随机卡第一屏。
-          #   panic 现场：★全 8 个 CPU 都卡在 avc_compute_av+0x60 -> security_compute_av
-          #   -> _raw_read_lock(policy_rwlock) -> queued_spin_lock_slowpath★，
-          #   而且 Tainted 里带 L（TAINT_SOFTLOCKUP）—— 先 soft lockup，再看门狗咬。
-          #
-          # 根因（上游 kernel/selinux/rules.c）：两个函数都在【持 policy_rwlock 写锁期间】
-          # 调 sched_setscheduler_nocheck()：
-          #   apply_kernelsu_rules()  —— 开机时 ksud 必调（KSU 内建规则路径），5.4 走 #else 分支
-          #   handle_sepolicy()       —— 模块 sepolicy.rule 注入路径，5.4 走 #else 分支
-          #     write_lock(lock);                                     // 拿 policy_rwlock 写锁
-          #     preempt_enable();
-          #     sched_setscheduler_nocheck(current, 1, &new_param);   // <= 致命
-          #     ...实际工作...
-          #     sched_setscheduler_nocheck(current, old_policy, &old_param);
-          #     preempt_disable();
-          #     write_unlock(lock);
-          #
-          # 而内核侧 kernel/sched/core.c：
-          #   _sched_setscheduler(p, policy, param, check)
-          #       -> __sched_setscheduler(p, &attr, check, ★true★)   // user 恒为 true
-          #          if (user) retval = ★security_task_setscheduler(p)★;
-          # => 持写锁期间触发 SELinux 检查 => avc_has_perm
-          #    => ★AVC 缓存未命中时★ avc_compute_av -> security_compute_av
-          #       -> read_lock(同一把 policy_rwlock) => ★同一 CPU 自死锁★
-          # => 写锁永不释放 => 全系统 AVC 检查饿死 => 看门狗咬。
-          # 注意 sched_setscheduler_nocheck 只跳过「属主/capability」检查，LSM 检查照样跑
-          # —— 所以缓存命中时不炸、未命中才炸 => ★间歇性★。
-          #
-          # 修法：删掉全部 4 处 sched_setscheduler_nocheck（两个函数各 2 处）。
-          #   它们想防「持锁期间被迁移/抢占」，而该目的上面已由
-          #     set_cpus_allowed_ptr(current, cpumask_of(raw_smp_processor_id()))
-          #   达成（亲和性钉住本 CPU，迁移被禁止），删掉是安全的。
+          # ★A22：修 KernelSU 上游 sepol 自死锁（全 8 CPU 卡 avc_compute_av 卡第一屏）
+          #   两个函数都在【持 policy_rwlock 写锁时】调 sched_setscheduler_nocheck()，
+          #   而它走 __sched_setscheduler(user=true) -> security_task_setscheduler()
+          #   -> SELinux avc_has_perm()；AVC 缓存未命中时会对同一把锁加读锁 => 同 CPU
+          #   自死锁 => 写锁永不释放 => 全系统 AVC 饿死 => 看门狗咬。
+          #   ★完整调用栈与推理见本步骤上方的 YAML 注释块★
           F=kernel/selinux/rules.c
           test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
           echo "===== A22 改之前 ====="
