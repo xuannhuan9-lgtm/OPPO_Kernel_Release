@@ -795,6 +795,12 @@ jobs:
           patch -p1 -f < /tmp/sukisu_ultra_fixed.patch || true
 
           OTHERS=$(find . -name '*.rej' | grep -v '^\./runtime/ksud\.c\.rej$' || true)
+          # keep_selinux_hide=false 时，第 1 轮不会下载 feature/selinux_hide.c 与
+          # infra/kernel_compat.h，本补丁对这两个文件的 hunk 必然失败 —— 那是预期内的，
+          # 不算错误（否则关掉开关就无法编译）。
+          if [ "${{ inputs.keep_selinux_hide }}" != "true" ]; then
+            OTHERS=$(echo "$OTHERS" | grep -v 'feature/selinux_hide\.c\.rej\|infra/kernel_compat\.h\.rej' || true)
+          fi
           if [ -n "$OTHERS" ]; then
             echo "::error::sukisu_ultra_fixed.patch 出现了预期之外的 reject："
             echo "$OTHERS"
@@ -885,10 +891,16 @@ jobs:
           echo "  改后 ksu_hooks 条目："
           grep -n -A8 'static struct security_hook_list ksu_hooks' "$LH" || true
           echo "  OK task_fix_setuid 钩子已强制编入（ksu_hooks 不再为空）"
-          grep -q '__maybe_static' feature/selinux_hide.c \
-            || { echo "::error::feature/selinux_hide.c 的 __maybe_static 没打上"; exit 1; }
-          grep -q '__has_attribute' infra/kernel_compat.h \
-            || { echo "::error::infra/kernel_compat.h 的 fallthrough 兜底没打上"; exit 1; }
+          # 这两项只在保留 SELinux hide 时才该存在
+          if [ "${{ inputs.keep_selinux_hide }}" = "true" ]; then
+            grep -q '__maybe_static' feature/selinux_hide.c \
+              || { echo "::error::feature/selinux_hide.c 的 __maybe_static 没打上"; exit 1; }
+            grep -q '__has_attribute' infra/kernel_compat.h \
+              || { echo "::error::infra/kernel_compat.h 的 fallthrough 兜底没打上"; exit 1; }
+            echo "  ✓ SELinux hide 相关两项（selinux_hide.c / kernel_compat.h）已就位"
+          else
+            echo "  · keep_selinux_hide=false ⇒ 跳过 selinux_hide.c / kernel_compat.h 的断言（这两个文件本就不存在）"
+          fi
           grep -q 'kernel_compat.h' policy/allowlist.c \
             || { echo "::error::policy/allowlist.c 没补 include"; exit 1; }
           grep -q 'ksu_strncpy_from_user_nofault' sulog/event.c \
@@ -1120,6 +1132,31 @@ jobs:
           grep -q 'K10x/A15' feature/selinux_hide.c
           grep -q '^    goto call_orig;' feature/selinux_hide.c
           echo "::notice title=A15（第 7 轮）::setprocattr 层已整层透传；su 切域改由原生实现按当前策略处理。"
+
+      - name: SELinux hide · 开机早期启用门禁（A16，治卡一屏）
+        if: ${{ inputs.enable_ksu && inputs.keep_selinux_hide }}
+        env:
+          A16FIX_B64: "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIEsxMHgvQTE2OiDnu5kgc2VsaW51eF9oaWRlIOWKoOOAjOW8gOacuuaXqeacn+aLkue7neWQr+eUqOOAjemXqOemgQojICAg5a6e5rWL77yac2VsaW51eF9oaWRlIOWcqOW8gOacuumYtuauteiiq+W6lOeUqCArIFp5Z2lzayBOZXh0ICsgTFNQb3NlZCA9PiDljaHkuIDlsY8KIyAgIOiAjOW8gOacuuaXtiBzZWxpbnV4X2hpZGU9MOOAgei/kOihjOaXtuWGjeaJk+W8gCA9PiDlrozlhajmraPluLgKaW1wb3J0IGlvLCBzeXMKClAgPSAiZmVhdHVyZS9zZWxpbnV4X2hpZGUuYyIKZGVmIHJkKHApOiByZXR1cm4gaW8ub3BlbihwLCBlbmNvZGluZz0idXRmLTgiKS5yZWFkKCkKZGVmIHdyKHAsIHMpOiBpby5vcGVuKHAsICJ3IiwgZW5jb2Rpbmc9InV0Zi04Iikud3JpdGUocykKCnMgPSByZChQKQppZiAiSzEweC9BMTYiIGluIHM6CiAgICBwcmludCgiOjplcnJvciB0aXRsZT1BMTY6OuW3sue7j+aJk+i/h+i/meS4quihpeS4ge+8jOS4jeimgemHjeWkjeaJp+ihjCIpOyBzeXMuZXhpdCgxKQoKIyAtLS0tIOKRoCDooaUgaW5jbHVkZSAtLS0tCmluY19vbGQgPSAiI2luY2x1ZGUgPGxpbnV4L3ZlcnNpb24uaD5cbiIKaW5jX25ldyA9ICIjaW5jbHVkZSA8bGludXgvdmVyc2lvbi5oPlxuI2luY2x1ZGUgPGxpbnV4L3RpbWVrZWVwaW5nLmg+IC8qIEsxMHgvQTE2OiBrdGltZV9nZXRfYm9vdHRpbWVfc2Vjb25kcygpICovXG4iCmlmIHMuY291bnQoaW5jX29sZCkgIT0gMToKICAgIHByaW50KCI6OmVycm9yIHRpdGxlPUExNjo6dmVyc2lvbi5oIOeahCBpbmNsdWRlIOWRveS4rSAlZCDlpITvvIjlupTkuLogMe+8iSIgJSBzLmNvdW50KGluY19vbGQpKTsgc3lzLmV4aXQoMSkKcyA9IHMucmVwbGFjZShpbmNfb2xkLCBpbmNfbmV3LCAxKQoKIyAtLS0tIOKRoSDlnKggZmVhdHVyZV9zZXQg6YeM5Yqg5byA5py66Zeo56aBIC0tLS0Kb2xkID0gIiIic3RhdGljIGludCBzZWxpbnV4X2hpZGVfZmVhdHVyZV9zZXQodTY0IHZhbHVlKQp7CiAgICBib29sIGVuYWJsZSA9IHZhbHVlICE9IDA7CiAgICBpbnQgcmV0ID0gMDsKICAgIHByX2luZm8oInNlbGludXhfaGlkZTogc2V0IHRvICVkXFxuIiwgZW5hYmxlKTsKICAgIG11dGV4X2xvY2soJnNlbGludXhfaGlkZV9tdXRleCk7CiAgICBrc3Vfc2VsaW51eF9oaWRlX2VuYWJsZWQgPSBlbmFibGU7CiIiIgoKbmV3ID0gIiIic3RhdGljIGludCBzZWxpbnV4X2hpZGVfZmVhdHVyZV9zZXQodTY0IHZhbHVlKQp7CiAgICBib29sIGVuYWJsZSA9IHZhbHVlICE9IDA7CiAgICBpbnQgcmV0ID0gMDsKICAgIHRpbWU2NF90IHVwID0ga3RpbWVfZ2V0X2Jvb3R0aW1lX3NlY29uZHMoKTsKICAgIHByX2luZm8oInNlbGludXhfaGlkZTogc2V0IHRvICVkXFxuIiwgZW5hYmxlKTsKCiAgICAvKiA9PT09PT09PT09PT09PT09PT09PT0gSzEweC9BMTYgPT09PT09PT09PT09PT09PT09PT09CiAgICAgKiDlvIDmnLrml6nmnJ/mi5Lnu53lkK/nlKjvvIzmi4bmjonjgIzljaHkuIDlsY/jgI3lnLDpm7fjgIIKICAgICAqCiAgICAgKiDlrp7mtYvvvIgyMDI2LTEwLTE177yJ77yaCiAgICAgKiAgIHNlbGludXhfaGlkZT0xIOWcqOOAkOW8gOacuumYtuauteOAkeiiqyBrc3VkIOW6lOeUqCArIFp5Z2lzayBOZXh0ICsgTFNQb3NlZAogICAgICogICA9PiDlvIDmnLrljaHlnKjnrKzkuIDlsY/vvIjkuJTor6XlgLzlt7LooqvmjIHkuYXljJbvvIzmiYDku6XmmK/jgJDkuIvkuIDmrKHjgJHlvIDmnLrmiY3lj5HkvZzvvIwKICAgICAqICAgICAg6KGo546w5oiQ44CM5pe25aW95pe25Z2P44CB6I6r5ZCN5YW25aaZ44CN77yJ44CCCiAgICAgKiAgIOaUueaIkCBzZWxpbnV4X2hpZGU9MCDlvIDmnLrjgIHns7vnu5/otbfmnaXlkI7lnKjnrqHnkIblmajph4zlho3miZPlvIAgPT4g5a6M5YWo5q2j5bi444CCCiAgICAgKgogICAgICog5Y6f5Zug77ya5pys5a6e546w5Lya5oqK5pW05LiqIFNFTGludXgg562W55Wl57uT5p6E5o2i5oiQ5aSH5Lu955qEIGZha2Vfc3RhdGXvvIwKICAgICAqICAg6ICMIFp5Z2lzayBOZXh0IOazqOWFpSB6eWdvdGXjgIFMU1Bvc2VkIOWKoOi9veS5n+mDveimgeeUqCBTRUxpbnV4IOetlueVpe+8jAogICAgICogICDkuKTogIXlnKjlvIDmnLrml6nmnJ/lj6DliqDlsLHkvJrkupLnm7jouKnjgIIKICAgICAqCiAgICAgKiDlpITnkIbvvJrlvIDmnLogR0FURSDnp5LlhoXmi5Lnu53vvIjov5Tlm54gLUVBR0FJTu+8jOS4jeaUueS7u+S9leeKtuaAge+8ie+8mwogICAgICogICDns7vnu5/otbfmnaXlkI7nrqHnkIblmajph4zlho3miZPlvIDljbPlj6/vvIzpmpDol4/og73lipvkuIDooYzkuI3lh4/jgIIKICAgICAqID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0gKi8KI2RlZmluZSBLU1VfU0VMSU5VWF9ISURFX0JPT1RfR0FURV9TRUMgMTIwCiAgICBpZiAoZW5hYmxlICYmIHVwIDwgKHRpbWU2NF90KUtTVV9TRUxJTlVYX0hJREVfQk9PVF9HQVRFX1NFQykgewogICAgICAgIHByX3dhcm4oInNlbGludXhfaGlkZTogYm9vdCBnYXRlIOKAlCB1cHRpbWUgJWxsZHMgPCAlZHMsIHJlZnVzZSB0byBlbmFibGUgIgogICAgICAgICAgICAgICAgIihlbmFibGluZyB0aGlzIGVhcmx5IGNvbmZsaWN0cyB3aXRoIFp5Z2lzayBOZXh0L0xTUG9zZWQgYW5kICIKICAgICAgICAgICAgICAgICJoYW5ncyB0aGUgYm9vdCBhdCB0aGUgZmlyc3Qgc2NyZWVuKS4gVHVybiBpdCBvbiBsYXRlciBpbiB0aGUgbWFuYWdlci5cXG4iLAogICAgICAgICAgICAgICAgKGxvbmcgbG9uZyl1cCwgS1NVX1NFTElOVVhfSElERV9CT09UX0dBVEVfU0VDKTsKICAgICAgICByZXR1cm4gLUVBR0FJTjsKICAgIH0KCiAgICBtdXRleF9sb2NrKCZzZWxpbnV4X2hpZGVfbXV0ZXgpOwogICAga3N1X3NlbGludXhfaGlkZV9lbmFibGVkID0gZW5hYmxlOwoiIiIKbiA9IHMuY291bnQob2xkKQppZiBuICE9IDE6CiAgICBwcmludCgiOjplcnJvciB0aXRsZT1BMTY6OmZlYXR1cmVfc2V0IOmUmueCueWRveS4rSAlZCDlpITvvIjlupTkuLogMe+8ie+8jFJlU3VraVNVIOa6kOeggee7k+aehOWPmOS6hiIgJSBuKQogICAgc3lzLmV4aXQoMSkKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCndyKFAsIHMpCgojIC0tLS0g6Ieq5qOAIC0tLS0KdCA9IHJkKFApCmNoZWNrcyA9IFsKICAgICgiSzEweC9BMTYiLCAiSzEweC9BMTYg5rOo6YeKIiksCiAgICAoIktTVV9TRUxJTlVYX0hJREVfQk9PVF9HQVRFX1NFQyIsICLpl6jnpoHluLjph48iKSwKICAgICgia3RpbWVfZ2V0X2Jvb3R0aW1lX3NlY29uZHMoKSIsICLorqHml7bosIPnlKgiKSwKICAgICgidGltZWtlZXBpbmcuaCIsICJpbmNsdWRlIiksCl0KZm9yIGssIHdoYXQgaW4gY2hlY2tzOgogICAgaWYgayBub3QgaW4gdDoKICAgICAgICBwcmludCgiOjplcnJvciB0aXRsZT1BMTYg6Ieq5qOAOjolcyDmsqHlhpnov5vljrvvvIjmib4gJXPvvIkiICUgKHdoYXQsIGspKTsgc3lzLmV4aXQoMSkKaWYgdC5jb3VudCgicmV0dXJuIC1FQUdBSU47IikgPCAxOgogICAgcHJpbnQoIjo6ZXJyb3IgdGl0bGU9QTE2IOiHquajgDo65rKh5pyJIHJldHVybiAtRUFHQUlOIik7IHN5cy5leGl0KDEpCiMg6Zeo56aB5b+F6aG75ZyoIG11dGV4X2xvY2sg5LmL5YmNCmlfZ2F0ZSA9IHQuaW5kZXgoIktTVV9TRUxJTlVYX0hJREVfQk9PVF9HQVRFX1NFQyIpCmlfbG9jayA9IHQuaW5kZXgoIm11dGV4X2xvY2soJnNlbGludXhfaGlkZV9tdXRleCk7XG4gICAga3N1X3NlbGludXhfaGlkZV9lbmFibGVkID0gZW5hYmxlOyIpCmlmIGlfZ2F0ZSA+IGlfbG9jazoKICAgIHByaW50KCI6OmVycm9yIHRpdGxlPUExNiDoh6rmo4A6OumXqOemgeS4jeWcqCBtdXRleF9sb2NrIOS5i+WJjSIpOyBzeXMuZXhpdCgxKQpwcmludCgiICBPSyBBMTbvvJrlvIDmnLogJWQg56eS5YaF5ouS57ud5ZCv55SoIHNlbGludXhfaGlkZe+8iOmXqOemgeWcqCBtdXRleF9sb2NrIOS5i+WJje+8iSIgJSAxMjApCg=="
+        run: |
+          set -euxo pipefail
+
+          # ★治本：selinux_hide 在【开机阶段】被应用 + Zygisk Next + LSPosed
+          #   => 卡一屏（实测 2026-10-15：该值会被 ksud 持久化，所以是
+          #      【下一次】开机才发作，表现成"时好时坏、莫名其妙"）。
+          #   本实现会把整个 SELinux 策略结构换成备份的 fake_state，
+          #   而 Zygisk 注入 zygote / LSPosed 加载也要用策略，开机早期叠加就互踩。
+          #   修法：开机 120 秒内拒绝启用（返回 -EAGAIN，不改任何状态）；
+          #   系统起来后在管理器里再打开即可 —— 隐藏能力一行不减。
+          KROOT="$BUILD_DIR/KernelSU/kernel"
+          test -d "$KROOT" || { echo "::error title=A16::找不到 $KROOT"; exit 1; }
+          echo "$A16FIX_B64" | base64 -d > /tmp/a16_fix.py
+          test -s /tmp/a16_fix.py || { echo "::error title=A16::补丁脚本解出来是空的"; exit 1; }
+          cd "$KROOT"
+          python3 /tmp/a16_fix.py
+          grep -q 'K10x/A16' feature/selinux_hide.c
+          grep -q 'KSU_SELINUX_HIDE_BOOT_GATE_SEC' feature/selinux_hide.c
+          grep -q 'ktime_get_boottime_seconds()' feature/selinux_hide.c
+          echo "::notice title=A16（第 8 轮）::selinux_hide 已加开机 120 秒启用门禁；开机阶段不再与 Zygisk/LSPosed 抢策略，卡一屏根治。"
 
       - name: Apply susfs v2.3.0 内核补丁 (5.4 NON-GKI)
         shell: bash
