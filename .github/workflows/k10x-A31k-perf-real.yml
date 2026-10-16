@@ -59,6 +59,14 @@ on:
         type: boolean
         default: true
       ksu_manager_package:
+      kpm_kpimg:
+        description: 'KPM 注入用哪套 kpimg。upstream=KernelPatch 官方最新 0.13.9（kptools-linux + kpimg-android，ANDROID=1 构建给 Android 内核）；sukisu=SukiSU 配套版 0.13.0（patch_linux 壳，历史默认，最稳）。两者都钉 SHA256'
+        type: choice
+        options:
+          - 'upstream'
+          - 'sukisu'
+        default: 'upstream'
+      ksu_manager_package:
         description: '面具包名。留空=内核自动扫描认领（推荐）。SukiSU Ultra 的 spoofed 版包名随机，要填得先用 adb 查真实包名'
         type: string
         default: ''
@@ -3263,24 +3271,23 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # ★★★ 这个工具的真实用法（我把 SukiSU_KernelPatch_patch/patch/main.cpp 读完了）★★★
-          #   patch_linux 是个 C++ 壳，它【忽略所有命令行参数】，内部固定执行：
-          #       kptools -p -s 123 -i Image -k <壳里内嵌的 kpimg> -o oImage
-          #   而且 main() 第一件事就是 check_file_exists("Image")
-          #   —— 当前工作目录里必须有一个**正好叫 Image** 的文件，否则直接 exit 1。
-          #   产物固定叫 **oImage**（不是 -o 指定的名字），superkey 固定 123。
-          #   A7 那次我在 $BUILD_DIR 里跑，那儿没有 Image，所以它 exit 1、什么都没产出 —— 就是这个原因。
-          #   所以：cd 进放 Image 的目录 → 不带参数地跑 → 收 oImage。
+          # ★ 两套 kpimg 都支持（dispatch 时用 kpm_kpimg 选）★
+          #   upstream = ★KernelPatch 官方最新 0.13.9★
+          #       kptools-linux（在 GitHub runner 这个 Linux x86_64 上跑）
+          #       + kpimg-android（★ANDROID=1 构建的，给 Android 内核用★）
+          #       KernelPatch 的 build.yml 原文：
+          #           export ANDROID=1; make hdr kpimg; mv kpimg kpimg-android
+          #           unset ANDROID;   make hdr kpimg; mv kpimg kpimg-linux
+          #       所以安卓内核必须用 -android 那个（选 -linux 会缺 Android 侧支持）。
+          #       直接调 kptools 的好处：它返回真实退出码，而 patch_linux 壳不看内部结果。
+          #   sukisu   = SukiSU 配套版 0.13.0（patch_linux 壳，内嵌 kpimg）
+          #       patch_linux 忽略所有参数，内部固定执行
+          #           kptools -p -s 123 -i Image -k <内嵌 kpimg> -o oImage
+          #       且 main() 先 check_file_exists("Image")，产物固定叫 oImage。
           #
-          #   壳不检查内部 kptools 的退出码（waitpid 后直接 return 0），
-          #   所以判断成功只能靠"oImage 是否存在且比 Image 大"。
+          # 两套的 kpimg 魔数都是 KP1158，偏移 6-9 的 4 字节是次版本号（0=0.13.0，9=0.13.9）。
           KT="$GITHUB_WORKSPACE/kpm-tools"
           mkdir -p "$KT"
-          PATCH_SHA=1bd00563e9d8fbbd11a16c0c1c59c5add406e6c5c92557def50f93d6f0aebe2d
-          curl -fsSL --retry 3 -o "$KT/patch_linux" \
-            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/kpm/patch_linux"
-          echo "$PATCH_SHA  $KT/patch_linux" | sha256sum -c -
-          chmod +x "$KT/patch_linux"
 
           KD="$BUILD_DIR/out/arch/arm64/boot"
           cd "$KD"
@@ -3291,14 +3298,48 @@ jobs:
           echo "原版 Image = $(stat -c%s Image) 字节"
           echo "magic(offset 56) = $(dd if=Image bs=1 skip=56 count=4 2>/dev/null | tr -d '\000' || true)"
 
+          LOG="$RUNNER_TEMP/kpm-patch.log"
           rm -f oImage
-          set +e
-          "$KT/patch_linux" > "$RUNNER_TEMP/kpm-patch.log" 2>&1
-          PRC=$?
-          set -e
-          echo "壳退出码 = $PRC（这个数本身不可信，壳不看内部结果）"
+          KPM_KIND="${{ inputs.kpm_kpimg }}"
+          echo "KPM 注入方式 = $KPM_KIND"
+
+          if [ "$KPM_KIND" = "upstream" ]; then
+            # ── 官方最新 0.13.9：kptools-linux + kpimg-android ──
+            KPT_SHA=6b9a56ac7db12ae1b76e6580ee52784019d6766453505d491a1ae39263205956
+            KPI_SHA=eb2e3d16fe69410150efcf6f9425baf8cad9ac0c39f051fc8b40ce57c7143adb
+            KBASE="https://github.com/bmax121/KernelPatch/releases/download/0.13.9"
+            curl -fsSL --retry 3 -o "$KT/kptools-linux"  "$KBASE/kptools-linux"
+            curl -fsSL --retry 3 -o "$KT/kpimg-android" "$KBASE/kpimg-android"
+            echo "$KPT_SHA  $KT/kptools-linux"  | sha256sum -c -
+            echo "$KPI_SHA  $KT/kpimg-android" | sha256sum -c -
+            chmod +x "$KT/kptools-linux"
+            KPI_VER=$(python3 -c "d=open('$KT/kpimg-android','rb').read(); print(int.from_bytes(d[6:10],'big'))")
+            echo "kpimg-android 大小 = $(stat -c%s "$KT/kpimg-android") 字节，内部次版本号 = $KPI_VER（期望 9 = 0.13.9）"
+            set +e
+            "$KT/kptools-linux" -p -s 123 -i Image -k "$KT/kpimg-android" -o oImage > "$LOG" 2>&1
+            PRC=$?
+            set -e
+            echo "kptools-linux 退出码 = $PRC"
+          else
+            # ── SukiSU 配套版 0.13.0（patch_linux 壳）──
+            # ★下载地址钉到 commit 547ae94bcaec，不再用 main 分支★
+            #   （原来从 main 下、却按钉死 SHA 校验 ⇒ 上游一更新就静默失效）
+            PATCH_SHA=1bd00563e9d8fbbd11a16c0c1c59c5add406e6c5c92557def50f93d6f0aebe2d
+            curl -fsSL --retry 3 -o "$KT/patch_linux" \
+              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/547ae94bcaec53d030398f857950c64662043a5d/kpm/patch_linux" \
+            || curl -fsSL --retry 3 -o "$KT/patch_linux" \
+              "https://cdn.jsdelivr.net/gh/SukiSU-Ultra/SukiSU_patch@547ae94bcaec53d030398f857950c64662043a5d/kpm/patch_linux"
+            echo "$PATCH_SHA  $KT/patch_linux" | sha256sum -c -
+            chmod +x "$KT/patch_linux"
+            set +e
+            "$KT/patch_linux" > "$LOG" 2>&1
+            PRC=$?
+            set -e
+            echo "壳退出码 = $PRC（这个数本身不可信，壳不看内部结果）"
+          fi
+
           echo "==================== kpm-patch.log 全文 ===================="
-          cat "$RUNNER_TEMP/kpm-patch.log" || true
+          cat "$LOG" || true
           echo "=========================================================="
 
           KPM_OK=no
@@ -3311,16 +3352,15 @@ jobs:
             mv -f oImage Image
             gzip -9 -c Image > Image.gz
             echo "KPMPATCH=ok"  >> "$GITHUB_ENV"
-            echo "::notice title=KPM 打补丁成功::Image 从 $SZ_OLD 涨到 $SZ_NEW 字节，Image.gz=$(stat -c%s Image.gz) 字节。superkey 固定 123（工具内写死）。刷这一版，面具设置里应出现 KPM；未打补丁的原版在同目录 *.nokpm。"
+            echo "KPM_KIND_USED=$KPM_KIND" >> "$GITHUB_ENV"
+            echo "::notice title=KPM 打补丁成功::$KPM_KIND ｜ Image 从 $SZ_OLD 涨到 $SZ_NEW 字节（+$((SZ_NEW-SZ_OLD))），Image.gz=$(stat -c%s Image.gz) 字节。superkey 固定 123（工具内写死）。未打补丁的原版在同目录 *.nokpm。"
           else
             rm -f oImage
             echo "KPMPATCH=fail" >> "$GITHUB_ENV"
-            MSG="$(tail -c 2500 "$RUNNER_TEMP/kpm-patch.log" 2>/dev/null | tr '\n' '|' | tr -d '\r' | sed -e 's/%/%25/g' | tail -c 3000)"
-            echo "::error title=KPM 打补丁失败（内核侧）::壳退出码=$PRC；oImage $([ -e oImage ] && echo 存在 || echo 不存在)；日志尾部：${MSG:-（空）}"
+            MSG="$(tail -c 2500 "$LOG" 2>/dev/null | tr '\n' '|' | tr -d '\r' | sed -e 's/%/%25/g' | tail -c 3000)"
+            echo "::error title=KPM 打补丁失败（内核侧）::方式=$KPM_KIND；退出码=$PRC；oImage $([ -e oImage ] && echo 存在 || echo 不存在)；日志尾部=$MSG"
             echo "本次产出的是未打补丁的 Image / Image.gz（能正常刷，只是面具里没有 KPM）。"
           fi
-
-          ls -lh "$KD" | head -20
       - name: 诊断 · 列出内建对象的重名符号（仅编译失败时自动跑）
         if: failure()
         shell: bash
