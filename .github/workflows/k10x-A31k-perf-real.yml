@@ -59,9 +59,9 @@ on:
         type: boolean
         default: true
       force_selinux_hide:
-        description: '★治本：解决 selinux_hide 重启后自动关闭★ 往内核命令行加 force_feature=selinux_hide:1 —— 这是 KSU 内置的「强制功能值」机制，它会在多个开机阶段重试，★专门等 selinux_hide 需要的 sepolicy 备份就绪★（feature.c 原注释如此）。实测背景：ksud 4.2.1-9 不会在开机时用 /data/adb/ksu/.feature_config 恢复 feature（.feature_config 里明明存着 id=4/value=1，但 dmesg 里没有开机的 selinux_hide: set to 1），所以值每次都回到 0。开了这个开关就不再依赖 ksud。代价：selinux_hide 变成「强制」，面具里的开关会被忽略（要关掉得重新编一版）。'
+        description: '★默认关★ 只有想「彻底锁死」selinux_hide 时才开。开了会往 cmdline 加 force_feature=selinux_hide:1 ⇒ 每开机自动应用（KSU 内置机制，会等 sepolicy 备份就绪），但★代价是面具里的开关失效★（ksu_set_feature 对 forced 项直接 return -EPERM）。★要保留面具开关就别开这个★，改用设备侧脚本 /sdcard/123云盘/修selinux_hide开关.sh：它装一个 post-fs-data.d 脚本，开机时精确读 /data/adb/ksu/.feature_config 里 id=4 的意愿值再 ksud feature set 回去，所以「开着就自动恢复、关了就保持关闭」。根因是 ksud 4.2.1-9 不会在开机时用 .feature_config 恢复 feature（文件里存着 id=4/value=1，dmesg 却没有开机的 selinux_hide: set to 1）；而 A10 的备份 3.675 秒就绪、post-fs-data.d 约 7 秒执行，来得及。'
         type: boolean
-        default: true
+        default: false
       kpm_kpimg:
         description: 'KPM 注入用哪套 kpimg。sukisu=★默认，已实测可用★ SukiSU 配套版（patch_linux 壳，内嵌他们定制过的 kpimg，能对接 SukiSU 的 stub）；upstream131=KernelPatch 官方 0.13.1（体积 181088，与 SukiSU 的 180160 最接近、架构还是老的那套，值得试）；upstream=官方 0.13.9 ★已实测不兼容★（0.13.4 起体积从 18 万翻到 33 万、架构大改；注入后 Image 大 298KB 但 kpimg 根本不启动，dmesg 无 KP KernelPatch Version / KP hook，面具看不到 KPM）。三套都钉 SHA256'
         type: choice
