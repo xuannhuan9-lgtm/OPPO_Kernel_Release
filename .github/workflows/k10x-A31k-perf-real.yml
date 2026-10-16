@@ -63,10 +63,11 @@ on:
         type: boolean
         default: false
       kpm_kpimg:
-        description: 'KPM 注入用哪套 kpimg。sukisu=★默认，已实测可用★ SukiSU 配套版（patch_linux 壳，内嵌他们定制过的 kpimg，能对接 SukiSU 的 stub）；upstream131=KernelPatch 官方 0.13.1（体积 181088，与 SukiSU 的 180160 最接近、架构还是老的那套，值得试）；upstream=官方 0.13.9 ★已实测不兼容★（0.13.4 起体积从 18 万翻到 33 万、架构大改；注入后 Image 大 298KB 但 kpimg 根本不启动，dmesg 无 KP KernelPatch Version / KP hook，面具看不到 KPM）。三套都钉 SHA256'
+        description: 'KPM 注入用哪套 kpimg。★build=从 SukiSU_KernelPatch_patch 源码构建最新★（SukiSU 专门用于给 Ultra 提供 KPM 的 KernelPatch fork，version 文件是 0.13.9、源码更新到 2026-10-14，含 kernel/patch/sukisu/sukisu.c 所以★必然有 sukisu_kpm hooks★；其 kptools 是★静态编译★所以没有 glibc 问题）；sukisu=★默认★ SukiSU_patch 配套的 0.13.0（patch_linux 壳，已实测可用）；upstream131=官方 KernelPatch 0.13.1（体积 181088 最接近，待验证）；upstream=官方 0.13.9（★已实测不兼容★：kpimg 里 sukisu_kpm 命中 0 次，启动了但不 hook stub）。除 build 外都钉 SHA256'
         type: choice
         options:
           - 'sukisu'
+          - 'build'
           - 'upstream131'
           - 'upstream'
         default: 'sukisu'
@@ -3307,9 +3308,51 @@ jobs:
           KPM_KIND="${{ inputs.kpm_kpimg }}"
           echo "KPM 注入方式 = $KPM_KIND"
 
-          if [ "$KPM_KIND" = "upstream" ] || [ "$KPM_KIND" = "upstream131" ]; then
+          if [ "$KPM_KIND" = "upstream" ] || [ "$KPM_KIND" = "upstream131" ] || [ "$KPM_KIND" = "build" ]; then
           # ── 官方最新 0.13.9：kptools-linux + kpimg-android ──
-          if [ "$KPM_KIND" = "upstream131" ]; then
+          if [ "$KPM_KIND" = "build" ]; then
+            # ★★ 从 SukiSU 的 KernelPatch fork 源码构建最新 kpimg ★★
+            #   SukiSU-Ultra/SukiSU_KernelPatch_patch（README：剪裁后用于给 SukiSU Ultra 提供 KPM 支持）
+            #   version 文件 = 0.13.9；源码含 kernel/patch/sukisu/sukisu.c ⇒ 必有 sukisu_kpm hooks
+            #   它的 tools/Makefile 是 LDFLAGS=-static ⇒ ★kptools 静态链接、不吃宿主 glibc★
+            KPSHA=4a721382b890ba6233a2aa67789ea73292483168
+            TCURL=https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+            TCDIR=$RUNNER_TEMP/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf
+            if [ ! -x "$TCDIR/bin/aarch64-none-elf-gcc" ]; then
+              echo "下载 ARM GNU toolchain 12.2 ..."
+              curl -fsSL --retry 3 -o "$RUNNER_TEMP/tc.tar.xz" "$TCURL"
+              tar -Jxf "$RUNNER_TEMP/tc.tar.xz" -C "$RUNNER_TEMP"
+            fi
+            test -x "$TCDIR/bin/aarch64-none-elf-gcc" || { echo "::error::toolchain 没就位"; exit 1; }
+            rm -rf "$KT/kp" && git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch.git "$KT/kp"
+            git -C "$KT/kp" fetch --depth=1 origin "$KPSHA" 2>/dev/null || true
+            git -C "$KT/kp" checkout -q "$KPSHA" 2>/dev/null || git -C "$KT/kp" checkout -q FETCH_HEAD
+            echo "KPM fork HEAD = $(git -C "$KT/kp" rev-parse HEAD)"
+            echo "fork 的 version 文件: $(tr '\n' ' ' < "$KT/kp/version")"
+            # kptools：静态编译（host gcc），绕开 glibc
+            make -C "$KT/kp/tools" -j"$(nproc)" >/dev/null 2>&1 || make -C "$KT/kp/tools" >/dev/null
+            test -x "$KT/kp/tools/kptools" || { echo "::error::kptools 没编出来"; exit 1; }
+            cp -f "$KT/kp/tools/kptools" "$KT/kptools-static"
+            file "$KT/kptools-static" | sed 's/^/    /'
+            # kpimg（android 变体）
+            ( cd "$KT/kp/kernel" && make clean >/dev/null 2>&1 || true; \
+              TARGET_COMPILE="$TCDIR/bin/aarch64-none-elf-" ANDROID=1 make hdr kpimg ) >/dev/null 2>&1 \
+              || ( cd "$KT/kp/kernel" && TARGET_COMPILE="$TCDIR/bin/aarch64-none-elf-" ANDROID=1 make hdr kpimg )
+            test -s "$KT/kp/kernel/kpimg" || { echo "::error::kpimg 没编出来"; exit 1; }
+            cp -f "$KT/kp/kernel/kpimg" "$KT/kpimg-build"
+            KPI_VER=$(python3 -c "d=open('$KT/kpimg-build','rb').read(); print(int.from_bytes(d[6:10],'big'))")
+            echo "编译出的 kpimg = $(stat -c%s "$KT/kpimg-build") 字节，内部次版本号 = $KPI_VER"
+            grep -ac sukisu_kpm "$KT/kpimg-build" 2>/dev/null | sed 's/^/    kpimg 里 sukisu_kpm 命中行数: /'
+            # 校验：编出来的必须含 sukisu_kpm，否则说明 clone 错了
+            [ "$(grep -ac sukisu_kpm "$KT/kpimg-build" 2>/dev/null || echo 0)" -ge 1 ] \
+              || { echo "::error::编出的 kpimg 里没有 sukisu_kpm ⇒ 不是 SukiSU 的 fork"; exit 1; }
+            set +e
+            "$KT/kptools-static" -p -s 123 -i Image -k "$KT/kpimg-build" -o oImage > "$LOG" 2>&1
+            PRC=$?
+            set -e
+            echo "kptools-static 退出码 = $PRC"
+            RAN=$([ "$PRC" = "0" ] && echo yes || echo no)
+          elif [ "$KPM_KIND" = "upstream131" ]; then
             # ★0.13.1：体积 181088，与 SukiSU 的 180160 最接近；0.13.4 起架构大改★
             KPT_SHA=b4ad9dc9a5b6a80dee1678bb1d36847dc1e040c6e6d07da3bb74b7d5db4a85e2
             KPI_SHA=0ef9eec875a1e969de1f7be89af2242a8835d94459ab3173714a4f0c220cb0d8
