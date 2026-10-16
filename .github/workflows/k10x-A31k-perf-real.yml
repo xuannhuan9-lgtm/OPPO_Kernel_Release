@@ -1654,25 +1654,125 @@ jobs:
           import io, sys
           p = "feature/cpu_spoof.c"
           t = io.open(p, encoding="utf-8").read()
+          NL = chr(10)
           if "K10x/A29-54" in t:
-              print("  (5.4 兼容补丁已在，跳过)"); sys.exit(0)
+              print("  (5.4 兼容补丁已在，跳过)")
+              sys.exit(0)
           MARK = "                /* Resolve 'curr_clocksource' double pointer and overwrite active clock mode */"
-          ENDMARK = 'pr_warn("ksu: set_spoof_cpu failed to resolve \'curr_clocksource\'\\n");'
           if MARK not in t:
-              print("::error title=A29-54::找不到 curr_clocksource 那段的开头"); sys.exit(1)
+              print("::error title=A29-54::找不到 curr_clocksource 段的注释锚点")
+              sys.exit(1)
           i = t.index(MARK)
-          j = t.index(ENDMARK, i)
-          k = t.index("}\n", j) + 2          # 该内层块的收尾 '}'
-          seg = t[i:k]
-          new = ("                /* K10x/A29-54: struct clocksource 在 5.4 没有 vdso_clock_mode 字段\n"
-                 "                 * （5.10+ 才有；5.4 用 clock->archdata.clock_mode），\n"
-                 "                 * 所以 5.4 跳过这一小段，其余伪装逻辑不受影响。 */\n"
-                 "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n"
-                 + seg +
-                 "#endif /* K10x/A29-54 */\n")
-          t = t[:i] + new + t[k:]
-          io.open(p, "w", encoding="utf-8").write(t)
-          print("  OK cpu_spoof.c: curr_clocksource 段已加 >=5.10 守卫（K10x/A29-54）")
+          b = t.index("{", i)
+          depth = 0
+          j = None
+          for n in range(b, len(t)):
+              if t[n] == "{":
+                  depth += 1
+              elif t[n] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      j = n + 1
+                      break
+          if j is None:
+              print("::error title=A29-54::curr_clocksource 段大括号不配对")
+              sys.exit(1)
+          seg = t[i:j]
+          if seg.count("{") != seg.count("}"):
+              print("::error title=A29-54::切出的段本身括号不平衡")
+              sys.exit(1)
+          new = (
+              "                /* K10x/A29-54: struct clocksource 在 5.4 没有 vdso_clock_mode" + NL
+              + "                 * 字段（5.10+ 才有；5.4 用 clock->archdata.clock_mode），" + NL
+              + "                 * 所以 5.4 跳过这一小段，其余伪装逻辑不受影响。" + NL
+              + "                 * 本 #if 必须包住整段的 { }，否则 5.4 上会缺一个 }。 */" + NL
+              + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)" + NL
+              + seg + NL
+              + "#endif /* K10x/A29-54 */" + NL
+          )
+          t2 = t[:i] + new + t[j:]
+          io.open(p, "w", encoding="utf-8").write(t2)
+
+          # ================= 可靠自检 =================
+          def strip_hi(src):
+              """模拟 5.4：剥掉 >=5.10 的块（正确处理 #else）"""
+              out = []
+              st = []
+              for line in src.split(NL):
+                  s = line.strip()
+                  if s.startswith("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)"):
+                      par = all(x[1] for x in st) if st else True
+                      st.append([par, False])
+                      continue
+                  if s.startswith("#if"):
+                      par = all(x[1] for x in st) if st else True
+                      st.append([par, par])
+                      continue
+                  if s.startswith("#else"):
+                      if st:
+                          st[-1][1] = (not st[-1][1]) and st[-1][0]
+                      continue
+                  if s.startswith("#endif"):
+                      if st:
+                          st.pop()
+                      continue
+                  if (all(x[1] for x in st) if st else True):
+                      out.append(line)
+              return NL.join(out)
+
+          def count_braces(t):
+              """能处理跨行注释 / 行注释 / 字符串的括号计数"""
+              i = 0
+              n = len(t)
+              op = cl = 0
+              stt = "code"
+              while i < n:
+                  c = t[i]
+                  if stt == "code":
+                      if c == "/" and i + 1 < n and t[i + 1] == "*":
+                          stt = "block"; i += 2; continue
+                      if c == "/" and i + 1 < n and t[i + 1] == "/":
+                          stt = "line"; i += 2; continue
+                      if c == '"':
+                          stt = "str"; i += 1; continue
+                      if c == "'":
+                          stt = "chr"; i += 1; continue
+                      if c == "{":
+                          op += 1
+                      elif c == "}":
+                          cl += 1
+                      i += 1; continue
+                  if stt == "block":
+                      if c == "*" and i + 1 < n and t[i + 1] == "/":
+                          stt = "code"; i += 2; continue
+                      i += 1; continue
+                  if stt == "line":
+                      if c == NL:
+                          stt = "code"
+                      i += 1; continue
+                  # str / chr
+                  if c == "\\":
+                      i += 2; continue
+                  if (stt == "str" and c == '"') or (stt == "chr" and c == "'"):
+                      stt = "code"
+                  i += 1; continue
+              return op, cl
+
+          low = strip_hi(t2)
+          op, cl = count_braces(low)
+          if op != cl:
+              print("::error title=A29-54::5.4 视图花括号不平衡 ({=%d }=%d)" % (op, cl))
+              sys.exit(1)
+          if "cs->vdso_clock_mode" in low:
+              print("::error title=A29-54::5.4 视图里仍有 cs->vdso_clock_mode")
+              sys.exit(1)
+          for need in ["reg_midr", "loops_per_jiffy", "elf_hwcap", "vdso_default", "cpu_hwcaps"]:
+              if need not in low:
+                  print("::error title=A29-54::5.4 视图丢了 " + need)
+                  sys.exit(1)
+          print("  OK cpu_spoof.c: curr_clocksource 整段已进 >=5.10 守卫")
+          print("     5.4 视图花括号 {=%d }=%d 平衡；其余伪装逻辑保留" % (op, cl))
+
           PY54
           grep -q "K10x/A29-54" feature/cpu_spoof.c
           grep -q "LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)" feature/cpu_spoof.c
