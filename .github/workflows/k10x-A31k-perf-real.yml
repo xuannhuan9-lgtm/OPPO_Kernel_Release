@@ -58,7 +58,6 @@ on:
         description: '★必须保持 true★ 保留我们移植的「隐藏 SELinux 修改」（A9~A15 五步：backup_policydb / backup_sidtab / ksu_get_uid_t / setprocattr 整层透传等）。这是我们隐藏能力的来源，默认且必须开启；设成 false 只是为了做对比实验，正常不要动'
         type: boolean
         default: true
-      ksu_manager_package:
       kpm_kpimg:
         description: 'KPM 注入用哪套 kpimg。upstream=KernelPatch 官方最新 0.13.9（kptools-linux + kpimg-android，ANDROID=1 构建给 Android 内核）；sukisu=SukiSU 配套版 0.13.0（patch_linux 壳，历史默认，最稳）。两者都钉 SHA256'
         type: choice
@@ -3315,6 +3314,8 @@ jobs:
             chmod +x "$KT/kptools-linux"
             KPI_VER=$(python3 -c "d=open('$KT/kpimg-android','rb').read(); print(int.from_bytes(d[6:10],'big'))")
             echo "kpimg-android 大小 = $(stat -c%s "$KT/kpimg-android") 字节，内部次版本号 = $KPI_VER（期望 9 = 0.13.9）"
+            # kptools 自己能报 kpimg 版本（-v 配合 -k）—— 比解析字节更权威
+            "$KT/kptools-linux" -v -k "$KT/kpimg-android" 2>&1 | sed 's/^/    kptools -v -k: /' || true
             set +e
             "$KT/kptools-linux" -p -s 123 -i Image -k "$KT/kpimg-android" -o oImage > "$LOG" 2>&1
             PRC=$?
