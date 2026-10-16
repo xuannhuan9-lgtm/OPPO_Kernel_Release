@@ -1299,6 +1299,133 @@ jobs:
           grep -q 'int ksu_dup_policydb(' selinux/sepolicy.c
           echo "::notice title=A10（第 2 轮）::backup_policydb / backup_sidtab、ksu_dup_policydb / ksu_destroy_policydb 已补齐；>=5.10 分支未改动。"
 
+      - name: ★A25 · 内核侧恢复 selinux_hide（读 .feature_config，格式化 data 也在）
+        env:
+          A25FIX_B64: |
+            IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIEsxMHgvQTI1OiBrZXJuZWwtc2lkZSBzZWxpbnV4X2hpZGUgcmVzdG9yZQojICAgcnVsZXMuYyBoYX
+            MgWkVSTyAjaW5jbHVkZSBsaW5lcyB1cHN0cmVhbSAoS1NVIHJlbGllcyBvbiBhIGZvcmNlLWluY2x1ZGUpLAojICAgc28gYWRkIGZzLmgvZXJy
+            LmggZXhwbGljaXRseSBoZXJlIC0tIGhlYWRlciBndWFyZHMgbWFrZSBpdCBoYXJtbGVzcy4KaW1wb3J0IGlvLCBzeXMKZGVmIHJkKHApOiByZX
+            R1cm4gaW8ub3BlbihwLCBlbmNvZGluZz0ndXRmLTgnKS5yZWFkKCkKZGVmIHdyKHAsIHMpOiBpby5vcGVuKHAsICd3JywgZW5jb2Rpbmc9J3V0
+            Zi04Jykud3JpdGUocykKZGVmIHN1Yl9vbmNlKHMsIG9sZCwgbmV3LCB3aGF0KToKICAgIG4gPSBzLmNvdW50KG9sZCkKICAgIGlmIG4gIT0gMT
+            oKICAgICAgICBwcmludCgnOjplcnJvciB0aXRsZT1BMjUgYW5jaG9yKCVzKTo6Zm91bmQgJWQsIGV4cGVjdCAxJyAlICh3aGF0LCBuKSk7IHN5
+            cy5leGl0KDEpCiAgICByZXR1cm4gcy5yZXBsYWNlKG9sZCwgbmV3LCAxKQpwID0gJ3NlbGludXgvcnVsZXMuYycKcyA9IHJkKHApCiMgLS0tLS
+            AoMSkg5pi+5byP6KGlIGluY2x1ZGXvvIjluYLnrYnvvIktLS0tCklOQyA9ICgnLyogSzEweC9BMjU6IGZvciBmaWxwX29wZW4va2VybmVsX3Jl
+            YWQvZmlscF9jbG9zZSBhbmQgSVNfRVJSICovXG4nCiAgICAgICAnI2luY2x1ZGUgPGxpbnV4L2ZzLmg+XG4nCiAgICAgICAnI2luY2x1ZGUgPG
+            xpbnV4L2Vyci5oPlxuJykKaWYgJyNpbmNsdWRlIDxsaW51eC9mcy5oPicgbm90IGluIHM6CiAgICBzID0gSU5DICsgcwogICAgcHJpbnQoJyAg
+            KEEyNSBpbmNsdWRlcyBwcmVwZW5kZWQpJykKZWxzZToKICAgIHByaW50KCcgIChmcy5oIGFscmVhZHkgcHJlc2VudCwgc2tpcCknKQojIC0tLS
+            0gKDIpIGtzdV9zZXRfZmVhdHVyZSDliY3nva7lo7DmmI7vvIjluYLnrYnvvIktLS0tCkRFQ0wgPSAnLyogSzEweC9BMjU6IGRlZmluZWQgaW4g
+            a2VybmVsL3BvbGljeS9mZWF0dXJlLmMgKi9cbmludCBrc3Vfc2V0X2ZlYXR1cmUodTMyIGZlYXR1cmVfaWQsIHU2NCB2YWx1ZSk7XG5cbicKbS
+            A9ICdzdGF0aWMgaW50IGFwcGx5X2tlcm5lbHN1X3J1bGVzX2ZuKHZvaWQgKnB0ciknCmlmICdpbnQga3N1X3NldF9mZWF0dXJlKHUzMiBmZWF0
+            dXJlX2lkLCB1NjQgdmFsdWUpOycgbm90IGluIHM6CiAgICBpZiBtIG5vdCBpbiBzOgogICAgICAgIHByaW50KCc6OmVycm9yIHRpdGxlPUEyNT
+            o6bm8gYXBwbHlfa2VybmVsc3VfcnVsZXNfZm4gbWFya2VyJyk7IHN5cy5leGl0KDEpCiAgICBzID0gc3ViX29uY2UocywgbSwgREVDTCArIG0s
+            ICdkZWNsJykKIyAtLS0tICgzKSDmj5LlhaXmgaLlpI3lnZfvvIjplJrngrnmmK8gQTEwIOaPkuWFpeeahCBiYWNrdXAgc3VjY2VzcyDooYzvvI
+            ktLS0tCkEyNSA9ICcgICAgICAgICAgICAgICAgICAgIC8qID09PT09IEsxMHgvQTI1OiBrZXJuZWwtc2lkZSBzZWxpbnV4X2hpZGUgcmVzdG9y
+            ZSA9PT09PVxuICAgICAgICAgICAgICAgICAgICAgKiBrc3VkIDQuMi4xLTkgZG9lcyBub3QgcmVzdG9yZSBmZWF0dXJlcyBmcm9tXG4gICAgIC
+            AgICAgICAgICAgICAgICAqIC9kYXRhL2FkYi9rc3UvLmZlYXR1cmVfY29uZmlnIGF0IGJvb3QsIHNvIHNlbGludXhfaGlkZVxuICAgICAgICAg
+            ICAgICAgICAgICAgKiBmYWxscyBiYWNrIHRvIDAgZXZlcnkgcmVib290IGV2ZW4gdGhvdWdoIHRoZSBmaWxlIHN0b3Jlc1xuICAgICAgICAgIC
+            AgICAgICAgICAgKiBpZD00L3ZhbHVlPTEuIGVuYWJsZSgpIG9ubHkgZmFpbHMgb24gYW4gZW1wdHlcbiAgICAgICAgICAgICAgICAgICAgICog
+            YmFja3VwX3BvbGljeWRiLCBzbyBkbyBpdCByaWdodCBoZXJlIHdoZXJlIHRoZSBiYWNrdXAgaGFzXG4gICAgICAgICAgICAgICAgICAgICAqIG
+            p1c3Qgc3VjY2VlZGVkOiBndWFyYW50ZWVkIGZpcnN0LXRyeSBzdWNjZXNzLlxuICAgICAgICAgICAgICAgICAgICAgKiBOTyBmb3JjZWRfbWFz
+            ayA9PiB0aGUgbWFuYWdlciB0b2dnbGUga2VlcHMgd29ya2luZy5cbiAgICAgICAgICAgICAgICAgICAgICogVGhpcyBsaXZlcyBpbiB0aGUga2
+            VybmVsID0+IHN1cnZpdmVzIGEgZGF0YSBmb3JtYXQuICovXG4gICAgICAgICAgICAgICAgICAgIHtcbiAgICAgICAgICAgICAgICAgICAgICAg
+            IHN0YXRpYyBib29sIGEyNV9kb25lID0gZmFsc2U7XG4gICAgICAgICAgICAgICAgICAgICAgICBpZiAoIWEyNV9kb25lICYmIGJhY2t1cF9wb2
+            xpY3lkYikge1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgIHN0cnVjdCBmaWxlICphMjVfZiA9IGZpbHBfb3BlbigiL2RhdGEvYWRiL2tz
+            dS8uZmVhdHVyZV9jb25maWciLCBPX1JET05MWSwgMCk7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgKCFJU19FUlIoYTI1X2YpKS
+            B7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHU4IGEyNV9idWZbMTI4XTtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAg
+            ICAgbG9mZl90IGEyNV9wb3MgPSAwO1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBpbnQgYTI1X24gPSAoaW50KWtlcm5lbF9yZW
+            FkKGEyNV9mLCBhMjVfYnVmLCBzaXplb2YoYTI1X2J1ZiksICZhMjVfcG9zKTtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgZmls
+            cF9jbG9zZShhMjVfZiwgTlVMTCk7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChhMjVfbiA+PSAyMCAmJiBhMjVfYnVmWz
+            BdID09IFwnVVwnICYmIGEyNV9idWZbMV0gPT0gXCdTXCcgJiZcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGEyNV9idWZb
+            Ml0gPT0gXCdLXCcgJiYgYTI1X2J1ZlszXSA9PSAweDdmKSB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB1MzIgYTI1X2
+            NudCA9ICoodTMyICopKGEyNV9idWYgKyA4KTtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHUzMiBhMjVfaTtcbiAgICAg
+            ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGEyNV9kb25lID0gdHJ1ZTtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC
+            AgIGlmIChhMjVfY250ID4gOClcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBhMjVfY250ID0gODtcbiAgICAgICAg
+            ICAgICAgICAgICAgICAgICAgICAgICAgICAgIGZvciAoYTI1X2kgPSAwOyBhMjVfaSA8IGEyNV9jbnQ7IGEyNV9pKyspIHtcbiAgICAgICAgIC
+            AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB1MzIgYTI1X29mZiA9IDEyICsgYTI1X2kgKiAxMjtcbiAgICAgICAgICAgICAgICAgICAg
+            ICAgICAgICAgICAgICAgICAgICB1MzIgYTI1X2lkLCBhMjVfdmFsO1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG
+            lmICgoaW50KShhMjVfb2ZmICsgOCkgPiBhMjVfbilcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgYnJlYWs7
+            XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgYTI1X2lkID0gKih1MzIgKikoYTI1X2J1ZiArIGEyNV9vZmYpO1xuIC
+            AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGEyNV92YWwgPSAqKHUzMiAqKShhMjVfYnVmICsgYTI1X29mZiArIDQpO1xu
+            ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChhMjVfaWQgPT0gNCAmJiBhMjVfdmFsID09IDEpIHtcbiAgICAgIC
+            AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaW50IGEyNV9yYyA9IGtzdV9zZXRfZmVhdHVyZSg0LCAxKTtcbiAgICAgICAg
+            ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgcHJfaW5mbygiSzEweC9BMjU6IHNlbGludXhfaGlkZSByZXN0b3JlZCwgcmM9JW
+            RcXG4iLCBhMjVfcmMpO1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBicmVhaztcbiAgICAgICAgICAgICAg
+            ICAgICAgICAgICAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgIC
+            AgICAgICAgICAgICAgICAgIH0gZWxzZSB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBwcl9pbmZvKCJLMTB4L0EyNTog
+            LmZlYXR1cmVfY29uZmlnIG5vdCByZWFkeSAobj0lZCksIHJldHJ5IGxhdGVyXFxuIiwgYTI1X24pO1xuICAgICAgICAgICAgICAgICAgICAgIC
+            AgICAgICAgICB9XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgfVxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIC8qIGNhbm5vdCBv
+            cGVuID0+IC9kYXRhIHVubW91bnRlZCBvciBmaWxlIGFic2VudCA9PlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAqIGtlZXAgYTI1X2
+            RvbmUgZmFsc2Ugc28gdGhlIG5leHQgY2FsbCByZXRyaWVzICovXG4gICAgICAgICAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgICAg
+            ICAgIH1cbicKYW5jaG9yID0gJyAgICAgICAgICAgICAgICAgICAgcHJfaW5mbygic2VsaW51eF9oaWRlOiBiYWNrdXAgcG9saWN5ZGIgc3VjY2
+            VzcyAobGVuICVkKVxcbiIsIGJsZW4pO1xuJwppZiAnSzEweC9BMjU6IGtlcm5lbC1zaWRlJyBpbiBzOgogICAgcHJpbnQoJyAgKEEyNSBibG9j
+            ayBhbHJlYWR5IHByZXNlbnQsIHNraXApJykKZWxpZiBhbmNob3Igbm90IGluIHM6CiAgICBwcmludCgnOjplcnJvciB0aXRsZT1BMjU6OkExMC
+            BiYWNrdXAtc3VjY2VzcyBsaW5lIG5vdCBmb3VuZCAoQTEwIG11c3QgcnVuIGZpcnN0KScpOyBzeXMuZXhpdCgxKQplbHNlOgogICAgcyA9IHMu
+            cmVwbGFjZShhbmNob3IsIGFuY2hvciArIEEyNSwgMSkKd3IocCwgcykKIyAtLS0tICg0KSDoh6rmo4AgLS0tLQpyID0gcmQocCkKYXNzZXJ0IC
+            dLMTB4L0EyNScgaW4gciwgJ0EyNSBjb21tZW50IG1pc3NpbmcnCmFzc2VydCAnI2luY2x1ZGUgPGxpbnV4L2ZzLmg+JyBpbiByLCAnZnMuaCBt
+            aXNzaW5nJwphc3NlcnQgJyNpbmNsdWRlIDxsaW51eC9lcnIuaD4nIGluIHIsICdlcnIuaCBtaXNzaW5nJwphc3NlcnQgJ2ludCBrc3Vfc2V0X2
+            ZlYXR1cmUodTMyIGZlYXR1cmVfaWQsIHU2NCB2YWx1ZSk7JyBpbiByLCAnZGVjbCBtaXNzaW5nJwphc3NlcnQgJ2ZpbHBfb3BlbigiL2RhdGEv
+            YWRiL2tzdS8uZmVhdHVyZV9jb25maWciJyBpbiByLCAnZmlscF9vcGVuIG1pc3NpbmcnCmFzc2VydCAna3N1X3NldF9mZWF0dXJlKDQsIDEpJy
+            BpbiByLCAnY2FsbCBtaXNzaW5nJwphc3NlcnQgJ2ZpbHBfY2xvc2UoJyBpbiByLCAnZmlscF9jbG9zZSBtaXNzaW5nJwphc3NlcnQgJ2tlcm5l
+            bF9yZWFkKCcgaW4gciwgJ2tlcm5lbF9yZWFkIG1pc3NpbmcnCmFzc2VydCAnZm9yY2VkX21hc2tbJyBub3QgaW4gciwgJ0EyNSBtdXN0IG5vdC
+            BpbmRleCBmb3JjZWRfbWFzaycKYXNzZXJ0ICdmb3JjZWRfcGVuZGluZycgbm90IGluIHIsICdBMjUgbXVzdCBub3QgdG91Y2ggZm9yY2VkX3Bl
+            bmRpbmcnCmFzc2VydCByLmNvdW50KCd7JykgPT0gci5jb3VudCgnfScpLCAnYnJhY2UgaW1iYWxhbmNlJwphc3NlcnQgci5jb3VudCgnKCcpID
+            09IHIuY291bnQoJyknKSwgJ3BhcmVuIGltYmFsYW5jZScKcHJpbnQoJyAgT0sgc2VsaW51eC9ydWxlcy5jIChBMjUgaW5zZXJ0ZWQpOyBzZWxm
+            LWNoZWNrIHBhc3NlZCcpCg==
+        run: |
+          set -euxo pipefail
+      
+          # ★这一段就是你要的「修复」，不是脚本、不是设备侧动作★
+          # 实测结论（都来自设备日志）：
+          #   · /data/adb/ksu/.feature_config 里明明存着 selinux_hide 的 id=4/value=1，
+          #     但每次重启后 ksud feature get selinux_hide 都是 0，
+          #     而且 dmesg 里★没有★开机的 "selinux_hide: set to 1"。
+          #   · 手动 ksud feature load 立刻成功（Value: 1 + context_write/access_write 两个 hook 挂上），
+          #     所以命令本身没问题，纯粹是开机时没人执行它。
+          #   · ksud 的 on_post_fs_data() 里本该有 init_features()（userspace/ksud/src/init_event.rs 第 98 行），
+          #     但实测 post-fs-data.d 脚本也没被执行 —— 说明这一整段没跑起来。
+          #   · 而 selinux_hide_enable() 失败的唯一原因就是 backup_policydb 为空。
+          #
+          # 所以A25 直接在内核里、★就在 A10 备份成功的那一刻★读用户意愿并启用：
+          #   · 此时 backup_policydb 必然就绪 ⇒ enable() 一次成功（实测备份在 3.685 秒完成）
+          #   · ★不设 forced_mask ⇒ 面具里的开关照旧能开能关★（与 force_feature 方案的区别）
+          #   · ★逻辑编译进内核 ⇒ 格式化 data 后修复本身仍在★
+          #     （只有「用户设的值」会随 data 清掉 —— 那本来就该重设）
+          #   · 不依赖 ksud 是否被 init 拉起、不依赖 post-fs-data.d、不受 has_magisk/safe mode 影响
+          #
+          # .feature_config 格式（已在设备真实数据上逐条验证过）：
+          #   header = magic(4)="USK\x7f" + version(4) + count(4)          （12 字节）
+          #   entry  = id(4) + value(4) + 预留(4)                          （12 字节 × count）
+          #   六条全部对上 feature list：[3,0]adb_root [2,0]sulog [1,1]kernel_umount
+          #                             [0,1]su_compat [6,0]shell_su_adb_only ★[4,1]selinux_hide★
+          KROOT="$BUILD_DIR/KernelSU/kernel"
+          test -d "$KROOT" || { echo "::error title=A25::找不到 $KROOT"; exit 1; }
+          echo "$A25FIX_B64" | base64 -d > /tmp/a25_fix.py
+          test -s /tmp/a25_fix.py || { echo "::error title=A25::补丁脚本解出来是空的"; exit 1; }
+          python3 /tmp/a25_fix.py
+          # ── 编译前自检（缺一样就 fail，绝不带着半个补丁去编译）──
+          grep -q "K10x/A25" selinux/rules.c
+          grep -q "#include <linux/fs.h>" selinux/rules.c
+          grep -q "#include <linux/err.h>" selinux/rules.c
+          grep -q "int ksu_set_feature(u32 feature_id, u64 value);" selinux/rules.c
+          grep -q "filp_open(\"/data/adb/ksu/.feature_config\", O_RDONLY, 0)" selinux/rules.c
+          grep -q "ksu_set_feature(4, 1)" selinux/rules.c
+          grep -q "filp_close(" selinux/rules.c
+          grep -q "kernel_read(" selinux/rules.c
+          # 不能被插两次
+          N25=$(grep -c "K10x/A25: kernel-side" selinux/rules.c || true)
+          [ "$N25" = "1" ] || { echo "::error title=A25::恢复块出现 $N25 次（应为 1）"; exit 1; }
+          # 绝不许碰 forced_mask ⇒ 否则面具开关就废了
+          ! grep -q "forced_mask\[" selinux/rules.c
+          ! grep -q "forced_pending" selinux/rules.c
+          # 结构平衡
+          python3 - <<'PYBAL'
+          import io
+          r = io.open("selinux/rules.c", encoding="utf-8").read()
+          assert r.count("{") == r.count("}"), "rules.c 花括号不平衡"
+          assert r.count("(") == r.count(")"), "rules.c 圆括号不平衡"
+          print("  A25 结构平衡自检通过")
+          PYBAL
+          echo "::notice title=A25（内核侧 selinux_hide 恢复）::在 A10 备份成功的那一刻读 /data/adb/ksu/.feature_config，若 id=4 值为 1 就 ksu_set_feature(4,1)；★不设 forced_mask 所以面具开关照旧可用★；★编译进内核所以格式化 data 后修复仍在★。至此彻底不依赖 ksud 的 post-fs-data —— 实测那段没跑起来（post-fs-data.d 脚本也没执行）。"
       - name: SELinux hide 补齐 ksu_get_uid_t / ksu_late_loaded / ksu_policy_rwlock_ptr（第 3 轮）
         if: ${{ inputs.enable_ksu && inputs.keep_selinux_hide }}
         env:
