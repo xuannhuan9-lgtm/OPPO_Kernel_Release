@@ -1426,6 +1426,88 @@ jobs:
           print("  A25 结构平衡自检通过")
           PYBAL
           echo "::notice title=A25（内核侧 selinux_hide 恢复）::在 A10 备份成功的那一刻读 /data/adb/ksu/.feature_config，若 id=4 值为 1 就 ksu_set_feature(4,1)；★不设 forced_mask 所以面具开关照旧可用★；★编译进内核所以格式化 data 后修复仍在★。至此彻底不依赖 ksud 的 post-fs-data —— 实测那段没跑起来（post-fs-data.d 脚本也没执行）。"
+      - name: ★A28 · UAPI 对齐到 5（修复 ksud 开机钩子被跳过 —— 模块脚本/selinux_hide 等全恢复）
+        env:
+          A28FIX_B64: |
+            IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIEsxMHgvQTI4OiDmiorlhoXlu7rlhoXmoLjnmoQgVUFQSSDniYjmnKzku44gMiDlr7npvZDliLAgNQoj
+            CiMg6IOM5pmv77yI6K+B5o2u6ZO+77yJ77yaCiMgICDCtyDnrqHnkIblmaggdjQuMi4xIOeahCBrc3VkIOaKpSAndWFwaTogNSfvvIjmnaXmupAg
+            bWFpbiDnur8gdWFwaS9zdXBlcmNhbGwuaO+8iQojICAgwrcg5oiR5Lus55qE5YaF5bu65YaF5qC477yIYnVpbHRpbiDliIbmlK/vvInlo7DmmI4g
+            S0VSTkVMX1NVX1VBUElfVkVSU0lPTiA9IDIKIyAgIMK3IGtzdWQg55qEIGluaXRfZXZlbnQucnMg56ys5LiA5Lu25LqL5bCx5pivIGVuc3VyZV91
+            YXBpX3ZlcnNpb25fbWF0Y2hlZCgp77yaCiMgICAgICAgICBpZiAoa2VybmVsX3VhcGkgIT0gdXNlcnNwYWNlX3VhcGkpIHsgZXJyb3IhKC4uLik7
+            IHJldHVybiBPaygoKSk7IH0KIyAgICAg4oeSIOS4jeWMuemFjeWwseKYheaVtOS4qiBvbl9wb3N0X2ZzX2RhdGEoKSDnm7TmjqXov5Tlm57imIUg
+            4oeSIOS4i+mdoui/meS6m+WFqOiiq+i3s+i/h++8mgojICAgICAgICAgZXhlY19jb21tb25fc2NyaXB0cygicG9zdC1mcy1kYXRhLmQiKSAgIOiu
+            vuWkh+S+p+W8gOacuuiEmuacrAojICAgICAgICAgbG9hZF9zZXBvbGljeV9ydWxlKCkgICAgICAgICAgICAgICAgICAgIOaooeWdlyBzZXBvbGlj
+            eS5ydWxlCiMgICAgICAgICBwcm9maWxlOjphcHBseV9zZXBvbGllcygpICAgICAgICAgICAgICAgcm9vdCBwcm9maWxlIOetlueVpQojICAgICAg
+            ICAgZmVhdHVyZTo6aW5pdF9mZWF0dXJlcygpICAgICAgICAgICAgICAgIOKYhXNlbGludXhfaGlkZSDnrYkgZmVhdHVyZSDnmoTmgaLlpI3imIUK
+            IyAgICAgICAgIGV4ZWNfc3RhZ2Vfc2NyaXB0KCJwb3N0LWZzLWRhdGEiKSAgICAgICDmiYDmnInmqKHlnZfnmoQgcG9zdC1mcy1kYXRhLnNoCiMg
+            ICAgICAgICB1bW91bnQ6OmxvYWRfdW1vdW50X2NvbmZpZygpICAgICAgICAgICAg5oyC6L296ZqQ6JeP6YWN572uCiMgICAgICAg77yIb25fc2Vy
+            dmljZXMgLyBvbl9ib290X2NvbXBsZXRlZCDlkIzmoLfmnInov5npgZPmo4Dmn6XvvIkKIwojIOS4uuS7gOS5iOaUueS4gOS4quaVsOWtl+WwseWk
+            n++8iOmDveW3sueUqOa6kOeggemAkOadoeaguOWunu+8ie+8mgojICAg4pGgIEtFUk5FTF9TVV9VQVBJX1ZFUlNJT04g5Zyo5YaF5qC46YeM5Y+q
+            5pyJ5Lik5aSE55So5Yiw77yaCiMgICAgICAgIGtlcm5lbC9pbmNsdWRlL3VhcGkvc3VwZXJjYWxsLmg6MTcgIOWumuS5iQojICAgICAgICBrZXJu
+            ZWwvc3VwZXJjYWxsL2Rpc3BhdGNoLmM6MjUgICAgICBjbWQudWFwaV92ZXJzaW9uID0gS0VSTkVMX1NVX1VBUElfVkVSU0lPTjsKIyAgICAgIOKH
+            kiDmsqHmnInliKvlpITkvp3otZblroPvvIzmlLnlroPpm7blia/kvZznlKjjgIIKIyAgIOKRoSBidWlsdGluIOeahOWGheaguOS7o+eggeKYheW3
+            sue7j+aYryB1YXBpIDUg6K+t5LmJ4piF77yaCiMgICAgICAgIMK3IGRvX3JlcG9ydF9ldmVudCDnmoQgRVZFTlRfU0VSVklDRVMg5YiG5pSv5bey
+            5bimIHNlcnZpY2VzX3N0YXJ0ZWTvvIwKIyAgICAgICAgICDpppbmrKHov5Tlm54gMeOAgemHjeWkjei/lOWbniAwIOKAlOKAlCDkuI4gZGV2KHVh
+            cGk1KSDliIbmlK/imIXkuIDlrZfkuI3lt67imIUKIyAgICAgICAgwrcgS1NVX0lPQ1RMX01BTkFHRVIgLyBkeW5hbWljX21hbmFnZXIg5bey5Zyo
+            CiMgICAgICAgIMK3IEtTVV9JT0NUTF9HRVRfV1JBUFBFUl9GRCDlt7LlnKgKIyAgICAgIOKHkiDkuIrmuLjlj6rmmK/mvI/kuobmiorpgqPkuKrn
+            iYjmnKzlj7fmlbDlrZfot5/nnYAgYnVtcOOAggojICAg4pGiIHVhcGkgNSDph4zlhoXmoLjnoa7lrp7msqHlrp7njrDnmoTkuKTmoLfvvIhTRVRf
+            U1BPT0ZfVkVSU0lPTiAvIFNFVF9TUE9PRl9DUFXvvIkKIyAgICAgIOS4jeW9seWTje+8mmRpc3BhdGNoIOWFnOW6lSBwcl93YXJuICsgcmV0dXJu
+            IC1FTk9UVFnvvIxrc3VkIOWPqiBsb2cgd2FybmluZ+OAggojCiMg5YGa5rOV77ya5oqKIERFQ0xBUkUoX191MzIsIEtFUk5FTF9TVV9VQVBJX1ZF
+            UlNJT04sIDIpIOaUueaIkCA177yIQTI0IOW3suWcqOi/memHjOS/rui/hwojICAgICAgIEtTVV9JT0NUTF9LUE0g55qEIHR5cG/vvIzmiYDku6Xm
+            lofku7blt7LmmK/lj6/nvJbor5HnirbmgIHvvInjgIIKaW1wb3J0IGlvLCBzeXMKZGVmIHJkKHApOiByZXR1cm4gaW8ub3BlbihwLCBlbmNvZGlu
+            Zz0ndXRmLTgnKS5yZWFkKCkKZGVmIHdyKHAsIHMpOiBpby5vcGVuKHAsICd3JywgZW5jb2Rpbmc9J3V0Zi04Jykud3JpdGUocykKcCA9ICdpbmNs
+            dWRlL3VhcGkvc3VwZXJjYWxsLmgnCnMgPSByZChwKQpPTEQgPSAnREVDTEFSRShfX3UzMiwgS0VSTkVMX1NVX1VBUElfVkVSU0lPTiwgMik7JwpO
+            RVcgPSAnREVDTEFSRShfX3UzMiwgS0VSTkVMX1NVX1VBUElfVkVSU0lPTiwgNSk7IC8qIEsxMHgvQTI4OiBhbGlnbiB3aXRoIG1hbmFnZXIgKHY0
+            LjIuMSBrc3VkIHJlcG9ydHMgdWFwaSA1KSAqLycKbiA9IHMuY291bnQoT0xEKQppZiBuID09IDA6CiAgICAjIOWPr+iDveW3sue7j+aYryA177yI
+            5bmC562J77yJCiAgICBpZiAnS0VSTkVMX1NVX1VBUElfVkVSU0lPTiwgNScgaW4gcyBvciAnS0VSTkVMX1NVX1VBUElfVkVSU0lPTiA9IDUnIGlu
+            IHM6CiAgICAgICAgcHJpbnQoJyAgKEEyOCBhbHJlYWR5IGFwcGxpZWQsIHNraXApJykKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoJzo6ZXJyb3Ig
+            dGl0bGU9QTI4OjpLRVJORUxfU1VfVUFQSV9WRVJTSU9OIOaXouS4jeaYryAyIOS5n+S4jeaYryA1Jyk7IHN5cy5leGl0KDEpCmVsaWYgbiA9PSAx
+            OgogICAgcyA9IHMucmVwbGFjZShPTEQsIE5FVywgMSkKICAgIHdyKHAsIHMpCiAgICBwcmludCgnICBPSyBpbmNsdWRlL3VhcGkvc3VwZXJjYWxs
+            Lmg6IEtFUk5FTF9TVV9VQVBJX1ZFUlNJT04gMiAtPiA1JykKZWxzZToKICAgIHByaW50KCc6OmVycm9yIHRpdGxlPUEyODo6S0VSTkVMX1NVX1VB
+            UElfVkVSU0lPTiDlh7rnjrAgJWQg5qyh77yI5bqU5Li6IDHvvIknICUgbik7IHN5cy5leGl0KDEpCiMg6Ieq5qOACnIgPSByZChwKQppbXBvcnQg
+            cmUKbSA9IHJlLnNlYXJjaChyJ0tFUk5FTF9TVV9VQVBJX1ZFUlNJT05bXjAtOV0qKFswLTldKyknLCByKQphc3NlcnQgbSwgJ0EyODog5om+5LiN
+            5YiwIEtFUk5FTF9TVV9VQVBJX1ZFUlNJT04nCmFzc2VydCBtLmdyb3VwKDEpID09ICc1JywgJ0EyODog5pS55a6M6L+Y5pivICVzJyAlIG0uZ3Jv
+            dXAoMSkKcHJpbnQoJyAgQTI4IHNlbGYtY2hlY2s6IFVBUEkg546w5Zyo5pivICVzJyAlIG0uZ3JvdXAoMSkpCg==
+        run: |
+          set -euxo pipefail
+      
+          # ★这是本次最重要的一处修复★
+          # 实测证据：管理器 v4.2.1 的 ksud 报 "uapi: 5"，而我们的内建内核声明 2。
+          # ksud 的 init_event.rs 第一件事就是 ensure_uapi_version_matched()，
+          # 不匹配就★整个 on_post_fs_data() 直接 return★，于是这些全被跳过：
+          #     exec_common_scripts("post-fs-data.d")   设备侧开机脚本
+          #     load_sepolicy_rule()                    模块 sepolicy.rule
+          #     profile::apply_sepolies()               root profile 策略
+          #     feature::init_features()                ★selinux_hide 等 feature 的恢复★
+          #     exec_stage_script("post-fs-data")       所有模块的 post-fs-data.sh
+          #     umount::load_umount_config()            挂载隐藏配置
+          #（on_services / on_boot_completed 同样有这道检查）
+          #
+          # 为什么改一个数字就够（源码逐条核实过）：
+          #   ① KERNEL_SU_UAPI_VERSION 在内核里只有两处用到：
+          #        kernel/include/uapi/supercall.h:17  定义
+          #        kernel/supercall/dispatch.c:25      cmd.uapi_version = KERNEL_SU_UAPI_VERSION;
+          #      ⇒ 没有别处依赖它 ⇒ 改它零副作用
+          #   ② builtin 的内核代码★已经是 uapi 5 语义★：
+          #        · do_report_event 的 EVENT_SERVICES 分支已带 services_started，
+          #          首次返回 1 / 重复返回 0 —— 与 dev(uapi5) 分支★一字不差★
+          #        · KSU_IOCTL_MANAGER / dynamic_manager 已在
+          #        · KSU_IOCTL_GET_WRAPPER_FD 已在
+          #      ⇒ 上游只是漏了把版本号数字跟着 bump
+          #   ③ uapi5 里内核确实没实现的 SET_SPOOF_VERSION / SET_SPOOF_CPU 不影响：
+          #        dispatch 兜底 pr_warn + return -ENOTTY，ksud 只 log warning
+          KROOT="$BUILD_DIR/KernelSU/kernel"
+          test -d "$KROOT" || { echo "::error title=A28::找不到 $KROOT"; exit 1; }
+          echo "$A28FIX_B64" | base64 -d > /tmp/a28_fix.py
+          test -s /tmp/a28_fix.py || { echo "::error title=A28::补丁脚本解出来是空的"; exit 1; }
+          python3 /tmp/a28_fix.py
+          # ── 编译前自检 ──
+          grep -q "KERNEL_SU_UAPI_VERSION, 5" include/uapi/supercall.h
+          ! grep -q "KERNEL_SU_UAPI_VERSION, 2" include/uapi/supercall.h
+          N28=$(grep -c "KERNEL_SU_UAPI_VERSION, 5" include/uapi/supercall.h || true)
+          [ "$N28" = "1" ] || { echo "::error title=A28::UAPI=5 出现 $N28 次（应为 1）"; exit 1; }
+          grep -n "KERNEL_SU_UAPI_VERSION" include/uapi/supercall.h || true
+          echo "::notice title=A28（UAPI 对齐）::内建内核 UAPI 2 ⇒ 5，与管理器 v4.2.1 的 ksud(uapi:5) 对齐。源码核实：KERNEL_SU_UAPI_VERSION 在内核里只有定义处 + dispatch.c:25 一处使用 ⇒ 零副作用；且 builtin 的 EVENT_SERVICES 分支已与 dev(uapi5) 一字不差，上游只是漏 bump 版本号。修好后 ksud 的 on_post_fs_data() 不再提前返回 ⇒ post-fs-data.d / 模块 post-fs-data.sh / sepolicy.rule / root profile 策略 / umount 配置 / feature 恢复 全部复活。"
       - name: SELinux hide 补齐 ksu_get_uid_t / ksu_late_loaded / ksu_policy_rwlock_ptr（第 3 轮）
         if: ${{ inputs.enable_ksu && inputs.keep_selinux_hide }}
         env:
