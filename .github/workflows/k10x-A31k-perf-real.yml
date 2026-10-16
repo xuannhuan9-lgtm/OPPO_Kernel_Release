@@ -59,10 +59,11 @@ on:
         type: boolean
         default: true
       kpm_kpimg:
-        description: 'KPM 注入用哪套 kpimg。sukisu=★默认，已实测可用★ SukiSU 配套版 0.13.0（patch_linux 壳，内嵌他们定制过的 kpimg，能对接 SukiSU 的 stub）；upstream=KernelPatch 官方 0.13.9（kptools-linux + kpimg-android）★实测不兼容★：Image 会大 298KB 但 kpimg 根本不启动（dmesg 里没有 KP KernelPatch Version / KP hook sukisu_kpm_* 行），面具里看不到 KPM。两者都钉 SHA256'
+        description: 'KPM 注入用哪套 kpimg。sukisu=★默认，已实测可用★ SukiSU 配套版（patch_linux 壳，内嵌他们定制过的 kpimg，能对接 SukiSU 的 stub）；upstream131=KernelPatch 官方 0.13.1（体积 181088，与 SukiSU 的 180160 最接近、架构还是老的那套，值得试）；upstream=官方 0.13.9 ★已实测不兼容★（0.13.4 起体积从 18 万翻到 33 万、架构大改；注入后 Image 大 298KB 但 kpimg 根本不启动，dmesg 无 KP KernelPatch Version / KP hook，面具看不到 KPM）。三套都钉 SHA256'
         type: choice
         options:
           - 'sukisu'
+          - 'upstream131'
           - 'upstream'
         default: 'sukisu'
       ksu_manager_package:
@@ -3302,11 +3303,20 @@ jobs:
           KPM_KIND="${{ inputs.kpm_kpimg }}"
           echo "KPM 注入方式 = $KPM_KIND"
 
-          if [ "$KPM_KIND" = "upstream" ]; then
+          if [ "$KPM_KIND" = "upstream" ] || [ "$KPM_KIND" = "upstream131" ]; then
           # ── 官方最新 0.13.9：kptools-linux + kpimg-android ──
-          KPT_SHA=6b9a56ac7db12ae1b76e6580ee52784019d6766453505d491a1ae39263205956
-          KPI_SHA=eb2e3d16fe69410150efcf6f9425baf8cad9ac0c39f051fc8b40ce57c7143adb
-          KBASE="https://github.com/bmax121/KernelPatch/releases/download/0.13.9"
+          if [ "$KPM_KIND" = "upstream131" ]; then
+            # ★0.13.1：体积 181088，与 SukiSU 的 180160 最接近；0.13.4 起架构大改★
+            KPT_SHA=b4ad9dc9a5b6a80dee1678bb1d36847dc1e040c6e6d07da3bb74b7d5db4a85e2
+            KPI_SHA=0ef9eec875a1e969de1f7be89af2242a8835d94459ab3173714a4f0c220cb0d8
+            KTAG=0.13.1
+          else
+            KPT_SHA=6b9a56ac7db12ae1b76e6580ee52784019d6766453505d491a1ae39263205956
+            KPI_SHA=eb2e3d16fe69410150efcf6f9425baf8cad9ac0c39f051fc8b40ce57c7143adb
+            KTAG=0.13.9
+          fi
+          KBASE="https://github.com/bmax121/KernelPatch/releases/download/$KTAG"
+          echo "使用 KernelPatch $KTAG（kptools-linux + kpimg-android）"
           curl -fsSL --retry 3 -o "$KT/kptools-linux"  "$KBASE/kptools-linux"
           curl -fsSL --retry 3 -o "$KT/kpimg-android" "$KBASE/kpimg-android"
           echo "$KPT_SHA  $KT/kptools-linux"  | sha256sum -c -
