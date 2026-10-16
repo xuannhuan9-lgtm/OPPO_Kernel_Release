@@ -1510,6 +1510,165 @@ jobs:
           [ "$N28" = "1" ] || { echo "::error title=A28::UAPI=5 出现 $N28 次（应为 1）"; exit 1; }
           grep -n "KERNEL_SU_UAPI_VERSION" include/uapi/supercall.h || true
           echo "::notice title=A28（UAPI 对齐）::内建内核 UAPI 2 ⇒ 5，与管理器 v4.2.1 的 ksud(uapi:5) 对齐。源码核实：KERNEL_SU_UAPI_VERSION 在内核里只有定义处 + dispatch.c:25 一处使用 ⇒ 零副作用；且 builtin 的 EVENT_SERVICES 分支已与 dev(uapi5) 一字不差，上游只是漏 bump 版本号。修好后 ksud 的 on_post_fs_data() 不再提前返回 ⇒ post-fs-data.d / 模块 post-fs-data.sh / sepolicy.rule / root profile 策略 / umount 配置 / feature 恢复 全部复活。"
+      - name: ★A29 · 补齐 uapi5 的 SET_SPOOF_VERSION / SET_SPOOF_CPU（和 SukiSU 最新版一模一样）
+        env:
+          A29FIX_B64: |
+            IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIEsxMHgvQTI5OiDooaXpvZAgdWFwaTUg57y65aSx55qE5Lik5LiqIGlvY3RsIOKAlOKAlCBTRVRfU1BP
+            T0ZfVkVSU0lPTiAvIFNFVF9TUE9PRl9DUFUKIwojIOiDjOaZr++8muWumOaWuSB2NC4yLjEg55qEIGtzdWQg5Lya55So5YiwIDE4IOS4qiBpb2N0
+            bO+8jOWFtuS4reWPquaciei/meS4pOS4quWGheW7uuWGheaguOayoeWunueOsAojICAg77yI5a6Y5pa5IGJ1aWx0aW4g5YiG5pSv5Lmf5rKh5pyJ
+            77yM5Y+q5pyJIGRldi9MS00g5YiG5pSv5pyJ77yJ44CC6KaB44CM5ZKM5pyA5paw54mI5LiA5qih5LiA5qC344CN5bCx5b6X6KGl44CCCiMKIyDi
+            mIXlhbPplK7vvJpidWlsdGluIOWIhuaUr+aYryB1bml0eSBidWlsZOKYhSDigJTigJQga2VybmVsL2tzdS5jIOeUqAojICAgICAvLyB1bml0eSBi
+            dWlsZAojICAgICAjaW5jbHVkZSAic3VwZXJjYWxsL2Rpc3BhdGNoLmMiCiMgICAgICNpbmNsdWRlICJzZWxpbnV4L3J1bGVzLmMiCiMgICDmiorl
+            kIQgLmMg55u05o6l5YyF5ZCr6L+b5p2l57yW6K+R77yM5omA5Lul77yaCiMgICAgIMK3IGRpc3BhdGNoLmMg6Ieq5bex5LiN6ZyA6KaB5Lu75L2V
+            ICNpbmNsdWRl77yI5ZyoIGtzdS5jIOeahOS4iuS4i+aWh+mHjOWxleW8gO+8iQojICAgICDCtyDmlrDnmoQgLmMg5b+F6aG75Yqg5Yiw4piFa3N1
+            LmMg55qEIHVuaXR5IOWIl+ihqOKYhemHjAojICAgICDCtyDimIXnu53kuI3og73imIXlvoAgTWFrZWZpbGUg5YqgIG9iai0kKENPTkZJR19LU1Up
+            ICs9IGZlYXR1cmUvY3B1X3Nwb29mLm8KIyAgICAgICDigJTigJQg6YKj5Lya5ZKMIHVuaXR5IOmHjOeahOmHjeWkjee8luivkSDih5IgZHVwbGlj
+            YXRlIHN5bWJvbAojCiMgNS40IOWPr+ihjOaAp+W3sumAkOadoeaguOWvue+8mgojICAgVkRTT19DTE9DS01PREVfQVJDSFRJTUVSIOKck++8iGFy
+            Y2gvYXJtNjQvaW5jbHVkZS9hc20vdmRzby9jbG9ja3NvdXJjZS5o77yJCiMgICBBUk02NF9XT1JLQVJPVU5EXzE0MTgwNDAg4pyT77yIYXJjaC9h
+            cm02NC9pbmNsdWRlL2FzbS9jcHVjYXBzLmg6NDXvvIkKIyAgIGN1cnJfY2xvY2tzb3VyY2Ug4pyTIC8gbG9vcHNfcGVyX2ppZmZ5IOKckyAvIGVs
+            Zl9od2NhcCDinJMKIyAgIE9QUE8gNS40IOeahCBpbmNsdWRlL3Zkc28vZGF0YXBhZ2UuaCDmnIkgQ1NfSFJFU19DT0FSU0UvQ1NfUkFXIOS4jgoj
+            ICAgc3RydWN0IHZkc29fZGF0YXssY2xvY2tfbW9kZX3vvIzkuJQgYXJjaC9hcm02NC8uLi4vdnN5c2NhbGwuaCDlsLHmmK8KIyAgIHZkYXRhW0NT
+            X0hSRVNfQ09BUlNFXSDnmoTmlbDnu4TnlKjms5Ug4oeSIOS4jiBkZXYg5Luj56CB6K+t5LmJ5LiA6Ie0IOKckwojICAgdmRzb19kZWZhdWx0IOWc
+            qCA1LjQg5rKh5pyJIOKHkiDku6PnoIEgZmluZCDkuI3liLDlsLEgcHJfd2Fybitza2lw77yI5pys5p2l5bCx5aaC5q2k77yJCmltcG9ydCBpbywg
+            c3lzCmRlZiByZChwKTogcmV0dXJuIGlvLm9wZW4ocCwgZW5jb2Rpbmc9J3V0Zi04JykucmVhZCgpCmRlZiB3cihwLCBzKTogaW8ub3BlbihwLCAn
+            dycsIGVuY29kaW5nPSd1dGYtOCcpLndyaXRlKHMpCmRlZiBzdWJfb25jZShzLCBvbGQsIG5ldywgd2hhdCk6CiAgICBuID0gcy5jb3VudChvbGQp
+            CiAgICBpZiBuICE9IDE6CiAgICAgICAgcHJpbnQoJzo6ZXJyb3IgdGl0bGU9QTI5IGFuY2hvciglcyk6OmZvdW5kICVkLCBleHBlY3QgMScgJSAo
+            d2hhdCwgbikpOyBzeXMuZXhpdCgxKQogICAgcmV0dXJuIHMucmVwbGFjZShvbGQsIG5ldywgMSkKCiMgPT09PT09PT09PT09PT09PT0g4pGgIHVh
+            cGkvc3VwZXJjYWxsLmggPT09PT09PT09PT09PT09PT0KcCA9ICdpbmNsdWRlL3VhcGkvc3VwZXJjYWxsLmgnCnMgPSByZChwKQppZiAnS1NVX0dF
+            VF9JTkZPX0ZMQUdfQlVORExFRCcgbm90IGluIHM6CiAgICBhID0gJ0RFQ0xBUkUoX191MzIsIEtTVV9HRVRfSU5GT19GTEFHX1BSX0JVSUxELCAo
+            MVUgPDwgMykpOycKICAgIHMgPSBzdWJfb25jZShzLCBhLCBhICsgJ1xuLyogSzEweC9BMjk6IHVhcGk1IOaWsOWiniBmbGFn77yIbWFpbiDnur/l
+            jp/mlofvvIkqL1xuREVDTEFSRShfX3UzMiwgS1NVX0dFVF9JTkZPX0ZMQUdfQlVORExFRCwgKDFVIDw8IDQpKTsnLCAnQlVORExFRCcpCmlmICdr
+            c3Vfc2V0X3Nwb29mX3ZlcnNpb25fY21kJyBub3QgaW4gczoKICAgIGEgPSAnc3RydWN0IGtzdV9nZXRfZnVsbF92ZXJzaW9uX2NtZCB7JwogICAg
+            c3QgPSAoCiAgICAgICAgJy8qIEsxMHgvQTI5OiB1YXBpNSDkvKroo4XmjqXlj6Pnu5PmnoQg4oCU4oCUIOS4jiBtYWluIOe6vyB1YXBpL3N1cGVy
+            Y2FsbC5oIOmAkOWtl+S4gOiHtCAqL1xuJwogICAgICAgICdzdHJ1Y3Qga3N1X3NldF9zcG9vZl92ZXJzaW9uX2NtZCB7XG4nCiAgICAgICAgJyAg
+            ICBfX3U4IHJlbGVhc2VbNjVdOyAvKiBJbnB1dDogZS5nLiwgIjUuMTAuMTE1LWFuZHJvaWQxMi05LWcwMDAwMDAwMCIgKi9cbicKICAgICAgICAn
+            ICAgIF9fdTggdmVyc2lvbls2NV07IC8qIElucHV0OiBlLmcuLCAiIzEgU01QIFBSRUVNUFQgVGh1IEphbiAxIDAwOjAwOjAwIFVUQyAyMDI2IiAq
+            L1xuJwogICAgICAgICd9O1xuXG4nCiAgICAgICAgJ3N0cnVjdCBrc3Vfc2V0X3Nwb29mX2NwdV9jbWQge1xuJwogICAgICAgICcgICAgX191MzIg
+            Y3B1X2luZGV4OyAgLyogVGFyZ2V0IHByb2Nlc3NvciBjb3JlIGluZGV4ICovXG4nCiAgICAgICAgJyAgICBfX3UzMiBtaWRyOyAgICAgICAvKiBN
+            YWluIElEIFJlZ2lzdGVyIHBheWxvYWQgKi9cbicKICAgICAgICAnICAgIF9fdTMyIGJvZ29taXBzOyAgIC8qIEJvZ29NSVBTIHBlcmZvcm1hbmNl
+            IHRpbWluZyBtZXRyaWMgKi9cbicKICAgICAgICAnICAgIF9fdTY0IGh3Y2FwOyAgICAgIC8qIE1haW4gRUxGIEhhcmR3YXJlIENhcGFiaWxpdGll
+            cyBtYXNrICovXG4nCiAgICAgICAgJyAgICBfX3U2NCBod2NhcDI7ICAgICAvKiBBdXhpbGlhcnkgRUxGIEhhcmR3YXJlIENhcGFiaWxpdGllcyBt
+            YXNrICovXG4nCiAgICAgICAgJ307XG5cbicKICAgICkKICAgIHMgPSBzdWJfb25jZShzLCBhLCBzdCArIGEsICdzcG9vZiBzdHJ1Y3RzJykKaWYg
+            J0tTVV9JT0NUTF9TRVRfU1BPT0ZfVkVSU0lPTicgbm90IGluIHM6CiAgICBhID0gIkRFQ0xBUkUoX191MzIsIEtTVV9JT0NUTF9MSVNUX1RSWV9V
+            TU9VTlQsIF9JT0MoX0lPQ19SRUFEIHwgX0lPQ19XUklURSwgJ0snLCAxMDMsIDApKTsiCiAgICBpbzIgPSAoYSArICdcbicKICAgICAgICAnLyog
+            SzEweC9BMjk6IHVhcGk1IOS8quijhSBpb2N0bO+8iG1haW4g57q/57yW5Y+3IDEwNC8xMDXvvIkqL1xuJwogICAgICAgICJERUNMQVJFKF9fdTMy
+            LCBLU1VfSU9DVExfU0VUX1NQT09GX1ZFUlNJT04sIF9JT0MoX0lPQ19XUklURSwgJ0snLCAxMDQsIDApKTtcbiIKICAgICAgICAiREVDTEFSRShf
+            X3UzMiwgS1NVX0lPQ1RMX1NFVF9TUE9PRl9DUFUsIF9JT0MoX0lPQ19XUklURSwgJ0snLCAxMDUsIDApKTsiKQogICAgcyA9IHN1Yl9vbmNlKHMs
+            IGEsIGlvMiwgJ3Nwb29mIGlvY3RscycpCndyKHAsIHMpCnByaW50KCcgIE9LIGluY2x1ZGUvdWFwaS9zdXBlcmNhbGwuaCcpCgojID09PT09PT09
+            PT09PT09PT09IOKRoSBzdXBlcmNhbGwvZGlzcGF0Y2guYyA9PT09PT09PT09PT09PT09PQojIHVuaXR5IGJ1aWxkIOS4iyBkaXNwYXRjaC5jIOWc
+            qCBrc3UuYyDph4zlsZXlvIDvvIzmiYDku6Xnm7TmjqXlnKjlroPpobbpg6jliqDlpLTnmoQgaW5jbHVkZSDljbPlj68KcCA9ICdzdXBlcmNhbGwv
+            ZGlzcGF0Y2guYycKcyA9IHJkKHApCmlmICdmZWF0dXJlL3V0c19zcG9vZi5oJyBub3QgaW4gczoKICAgIGhkciA9ICgnLyogSzEweC9BMjk6IHVh
+            cGk1IOS8quijheaOpeWPo++8iGRldiDliIbmlK/lkIzmrL7lrp7njrDvvIkqL1xuJwogICAgICAgICAgICcjaW5jbHVkZSAiZmVhdHVyZS91dHNf
+            c3Bvb2YuaCJcbicKICAgICAgICAgICAnI2luY2x1ZGUgImZlYXR1cmUvY3B1X3Nwb29mLmgiXG4nCiAgICAgICAgICAgJ1xuJykKICAgIHMgPSBo
+            ZHIgKyBzCmlmICdkb19zZXRfc3Bvb2ZfdmVyc2lvbicgbm90IGluIHM6CiAgICBhID0gJ3N0YXRpYyBpbnQgbGlzdF90cnlfdW1vdW50KHZvaWQg
+            X191c2VyICphcmcpJwogICAgaCA9ICgKICAgICAgICAnc3RhdGljIGludCBkb19zZXRfc3Bvb2ZfdmVyc2lvbih2b2lkIF9fdXNlciAqYXJnKVxu
+            JwogICAgICAgICd7XG4nCiAgICAgICAgJyAgICBzdHJ1Y3Qga3N1X3NldF9zcG9vZl92ZXJzaW9uX2NtZCBjbWQ7XG5cbicKICAgICAgICAnICAg
+            IGlmIChjb3B5X2Zyb21fdXNlcigmY21kLCBhcmcsIHNpemVvZihjbWQpKSlcbicKICAgICAgICAnICAgICAgICByZXR1cm4gLUVGQVVMVDtcblxu
+            JwogICAgICAgICIgICAgY21kLnJlbGVhc2Vbc2l6ZW9mKGNtZC5yZWxlYXNlKSAtIDFdID0gJ1xcMCc7XG4iCiAgICAgICAgIiAgICBjbWQudmVy
+            c2lvbltzaXplb2YoY21kLnZlcnNpb24pIC0gMV0gPSAnXFwwJztcblxuIgogICAgICAgICIgICAgcmV0dXJuIGtzdV9zZXRfc3Bvb2ZfdmVyc2lv
+            bihjbWQucmVsZWFzZVswXSAhPSAnXFwwJyA/IGNtZC5yZWxlYXNlIDogTlVMTCxcbiIKICAgICAgICAiICAgICAgICAgICAgICAgICAgICAgICAg
+            ICAgICAgICAgY21kLnZlcnNpb25bMF0gIT0gJ1xcMCcgPyBjbWQudmVyc2lvbiA6IE5VTEwpO1xuIgogICAgICAgICd9XG5cbicKICAgICAgICAn
+            c3RhdGljIGludCBkb19zZXRfc3Bvb2ZfY3B1KHZvaWQgX191c2VyICphcmcpXG4nCiAgICAgICAgJ3tcbicKICAgICAgICAnICAgIHN0cnVjdCBr
+            c3Vfc2V0X3Nwb29mX2NwdV9jbWQgY21kO1xuXG4nCiAgICAgICAgJyAgICBpZiAoY29weV9mcm9tX3VzZXIoJmNtZCwgYXJnLCBzaXplb2YoY21k
+            KSkpXG4nCiAgICAgICAgJyAgICAgICAgcmV0dXJuIC1FRkFVTFQ7XG5cbicKICAgICAgICAnICAgIHJldHVybiBrc3Vfc2V0X3Nwb29mX2NwdSgm
+            Y21kKTtcbicKICAgICAgICAnfVxuXG4nCiAgICApCiAgICBzID0gc3ViX29uY2UocywgYSwgaCArIGEsICdzcG9vZiBoYW5kbGVycycpCmlmICcu
+            Y21kID0gS1NVX0lPQ1RMX1NFVF9TUE9PRl9WRVJTSU9OJyBub3QgaW4gczoKICAgIGEgPSAoJyAgICAgICAgLmNtZCA9IEtTVV9JT0NUTF9MSVNU
+            X1RSWV9VTU9VTlQsXG4nCiAgICAgICAgICcgICAgICAgIC5uYW1lID0gIkxJU1RfVFJZX1VNT1VOVCIsXG4nCiAgICAgICAgICcgICAgICAgIC5o
+            YW5kbGVyID0gbGlzdF90cnlfdW1vdW50LFxuJwogICAgICAgICAnICAgICAgICAucGVybV9jaGVjayA9IG1hbmFnZXJfb3Jfcm9vdFxuJwogICAg
+            ICAgICAnICAgIH0sJykKICAgIGUgPSAoYSArICdcbicKICAgICAgICAnICAgIC8qIEsxMHgvQTI5OiB1YXBpNSDkvKroo4XmjqXlj6PvvIhkZXYg
+            57q/5LiK5pivIG9ubHlfcm9vdO+8iSovXG4nCiAgICAgICAgJyAgICB7XG4nCiAgICAgICAgJyAgICAgICAgLmNtZCA9IEtTVV9JT0NUTF9TRVRf
+            U1BPT0ZfVkVSU0lPTixcbicKICAgICAgICAnICAgICAgICAubmFtZSA9ICJTRVRfU1BPT0ZfVkVSU0lPTiIsXG4nCiAgICAgICAgJyAgICAgICAg
+            LmhhbmRsZXIgPSBkb19zZXRfc3Bvb2ZfdmVyc2lvbixcbicKICAgICAgICAnICAgICAgICAucGVybV9jaGVjayA9IG9ubHlfcm9vdFxuJwogICAg
+            ICAgICcgICAgfSxcbicKICAgICAgICAnICAgIHtcbicKICAgICAgICAnICAgICAgICAuY21kID0gS1NVX0lPQ1RMX1NFVF9TUE9PRl9DUFUsXG4n
+            CiAgICAgICAgJyAgICAgICAgLm5hbWUgPSAiU0VUX1NQT09GX0NQVSIsXG4nCiAgICAgICAgJyAgICAgICAgLmhhbmRsZXIgPSBkb19zZXRfc3Bv
+            b2ZfY3B1LFxuJwogICAgICAgICcgICAgICAgIC5wZXJtX2NoZWNrID0gb25seV9yb290XG4nCiAgICAgICAgJyAgICB9LCcpCiAgICBzID0gc3Vi
+            X29uY2UocywgYSwgZSwgJ2Rpc3BhdGNoIHRhYmxlIGVudHJpZXMnKQp3cihwLCBzKQpwcmludCgnICBPSyBzdXBlcmNhbGwvZGlzcGF0Y2guYycp
+            CgojID09PT09PT09PT09PT09PT09IOKRoiBrc3UuYyDnmoQgdW5pdHkgYnVpbGQg5YiX6KGoID09PT09PT09PT09PT09PT09CnAgPSAna3N1LmMn
+            CnMgPSByZChwKQppZiAnZmVhdHVyZS9jcHVfc3Bvb2YuYycgbm90IGluIHM6CiAgICBhID0gJyNpbmNsdWRlICJmZWF0dXJlL3NoZWxsX3N1X2Fk
+            Yl9vbmx5LmMiJwogICAgdSA9IChhICsgJ1xuJwogICAgICAgICAnLyogSzEweC9BMjk6IHVhcGk1IOS8quijheaOpeWPo++8iHVuaXR5IGJ1aWxk
+            IOW/hemhu+WcqOi/memHjOeZu+iusO+8jOWQpuWImeS4jeS8muiiq+e8luivke+8iSovXG4nCiAgICAgICAgICcjaW5jbHVkZSAiZmVhdHVyZS9j
+            cHVfc3Bvb2YuYyJcbicKICAgICAgICAgJyNpbmNsdWRlICJmZWF0dXJlL3V0c19zcG9vZi5jIicpCiAgICBzID0gc3ViX29uY2UocywgYSwgdSwg
+            J3VuaXR5IGxpc3QnKQp3cihwLCBzKQpwcmludCgnICBPSyBrc3UuY++8iHVuaXR5IOWIl+ihqOW3sueZu+iusO+8iScpCgojID09PT09PT09PT09
+            PT09PT09IOKRoyDoh6rmo4AgPT09PT09PT09PT09PT09PT0KdSA9IHJkKCdpbmNsdWRlL3VhcGkvc3VwZXJjYWxsLmgnKTsgZCA9IHJkKCdzdXBl
+            cmNhbGwvZGlzcGF0Y2guYycpOyBrID0gcmQoJ2tzdS5jJykKZm9yIHggaW4gWydLU1VfR0VUX0lORk9fRkxBR19CVU5ETEVEJywnc3RydWN0IGtz
+            dV9zZXRfc3Bvb2ZfdmVyc2lvbl9jbWQnLAogICAgICAgICAgJ3N0cnVjdCBrc3Vfc2V0X3Nwb29mX2NwdV9jbWQnLCdLU1VfSU9DVExfU0VUX1NQ
+            T09GX1ZFUlNJT04nLCdLU1VfSU9DVExfU0VUX1NQT09GX0NQVSddOgogICAgYXNzZXJ0IHggaW4gdSwgJ3VhcGkg57y65bCRICcgKyB4CmZvciB4
+            IGluIFsnZG9fc2V0X3Nwb29mX3ZlcnNpb24nLCdkb19zZXRfc3Bvb2ZfY3B1JywnLmNtZCA9IEtTVV9JT0NUTF9TRVRfU1BPT0ZfVkVSU0lPTics
+            CiAgICAgICAgICAnLmNtZCA9IEtTVV9JT0NUTF9TRVRfU1BPT0ZfQ1BVJywnZmVhdHVyZS91dHNfc3Bvb2YuaCcsJ2ZlYXR1cmUvY3B1X3Nwb29m
+            LmgnXToKICAgIGFzc2VydCB4IGluIGQsICdkaXNwYXRjaCDnvLrlsJEgJyArIHgKZm9yIHggaW4gWydmZWF0dXJlL2NwdV9zcG9vZi5jJywnZmVh
+            dHVyZS91dHNfc3Bvb2YuYyddOgogICAgYXNzZXJ0IHggaW4gaywgJ2tzdS5jIHVuaXR5IOe8uuWwkSAnICsgeApmb3IgZiBpbiBbJ2luY2x1ZGUv
+            dWFwaS9zdXBlcmNhbGwuaCcsJ3N1cGVyY2FsbC9kaXNwYXRjaC5jJywna3N1LmMnXToKICAgIHQgPSByZChmKQogICAgYXNzZXJ0IHQuY291bnQo
+            J3snKSA9PSB0LmNvdW50KCd9JyksIGYgKyAnIOiKseaLrOWPt+S4jeW5s+ihoScKICAgIGFzc2VydCB0LmNvdW50KCcoJykgPT0gdC5jb3VudCgn
+            KScpLCBmICsgJyDlnIbmi6zlj7fkuI3lubPooaEnCnByaW50KCcgIEEyOSBzZWxmLWNoZWNrIHBhc3NlZCcpCg==
+        run: |
+          set -euxo pipefail
+      
+          # 官方 v4.2.1 的 ksud 一共用到 18 个 ioctl；内建内核有 30 个，
+          # ★唯一缺的就是这两个伪装接口★（官方 builtin 分支也没有，只有 dev/LKM 有）。
+          # 要「和 SukiSU Ultra 最新版一模一样」就必须补上。
+          #
+          # ★关键：builtin 是 unity build★ —— kernel/ksu.c 里用
+          #     // unity build
+          #     #include "supercall/dispatch.c"
+          #     #include "selinux/rules.c"
+          #   直接包含各 .c。所以：
+          #     · dispatch.c 自己不需要 #include（在 ksu.c 上下文里展开）
+          #     · 新 .c 必须加进★ksu.c 的 unity 列表★
+          #     · ★绝不能★往 Makefile 加 obj-$(CONFIG_KSU) += feature/cpu_spoof.o
+          #       —— 那会和 unity 里的重复编译 ⇒ duplicate symbol
+          #
+          # 5.4 可行性已逐条核对：
+          #   VDSO_CLOCKMODE_ARCHTIMER ✓（arch/arm64/include/asm/vdso/clocksource.h）
+          #   ARM64_WORKAROUND_1418040 ✓（arch/arm64/include/asm/cpucaps.h:45）
+          #   curr_clocksource ✓ / loops_per_jiffy ✓ / elf_hwcap ✓ / cpu_data ✓
+          #   OPPO 5.4 的 include/vdso/datapage.h 有 CS_HRES_COARSE/CS_RAW 与
+          #   struct vdso_data{,clock_mode}；arch/arm64/.../vsyscall.h 就是
+          #   vdata[CS_HRES_COARSE] 的数组用法 ⇒ 与 dev 代码语义一致 ✓
+          #   vdso_default 在 5.4 没有 ⇒ 代码 find 不到就 pr_warn+skip（本来就如此）
+          DV=https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/4cd7415ac0340de90bfe1f9f5e21d1f3eff6a9a1/kernel
+          KROOT="$BUILD_DIR/KernelSU/kernel"
+          test -d "$KROOT" || { echo "::error title=A29::找不到 $KROOT"; exit 1; }
+          cd "$KROOT"
+          # ── ① 下载 dev 分支的 4 个官方实现文件（钉 commit） ──
+          mkdir -p feature
+          dl(){ curl -fsSL --retry 3 -o "$1" "$DV/$2" || { echo "::error title=A29::下载失败 $2"; exit 1; }; test -s "$1" || { echo "::error title=A29::下到空文件 $2"; exit 1; }; echo "  OK $2 ($(wc -c <"$1") 字节)"; }
+          dl feature/cpu_spoof.c   feature/cpu_spoof.c
+          dl feature/cpu_spoof.h   feature/cpu_spoof.h
+          dl feature/uts_spoof.c   feature/uts_spoof.c
+          dl feature/uts_spoof.h   feature/uts_spoof.h
+          grep -q "ksu_set_spoof_cpu"       feature/cpu_spoof.c
+          grep -q "ksu_set_spoof_version"   feature/uts_spoof.c
+          grep -q "find_kernel_symbol_exact" feature/cpu_spoof.c
+          # ── ② 打 uapi + dispatch + ksu.c(unity) 的补丁 ──
+          echo "$A29FIX_B64" | base64 -d > /tmp/a29_fix.py
+          test -s /tmp/a29_fix.py || { echo "::error title=A29::补丁脚本解出来是空的"; exit 1; }
+          python3 /tmp/a29_fix.py
+          # ── ③ 编译前自检 ──
+          grep -q "KSU_GET_INFO_FLAG_BUNDLED"                 include/uapi/supercall.h
+          grep -q "struct ksu_set_spoof_version_cmd"          include/uapi/supercall.h
+          grep -q "struct ksu_set_spoof_cpu_cmd"              include/uapi/supercall.h
+          grep -q "KSU_IOCTL_SET_SPOOF_VERSION"               include/uapi/supercall.h
+          grep -q "KSU_IOCTL_SET_SPOOF_CPU"                   include/uapi/supercall.h
+          grep -q "do_set_spoof_version"                      supercall/dispatch.c
+          grep -q "do_set_spoof_cpu"                          supercall/dispatch.c
+          grep -q ".cmd = KSU_IOCTL_SET_SPOOF_VERSION"        supercall/dispatch.c
+          grep -q ".cmd = KSU_IOCTL_SET_SPOOF_CPU"            supercall/dispatch.c
+          grep -q "feature/uts_spoof.h"                       supercall/dispatch.c
+          grep -q "feature/cpu_spoof.h"                       supercall/dispatch.c
+          grep -q "feature/cpu_spoof.c"                       ksu.c
+          grep -q "feature/uts_spoof.c"                       ksu.c
+          # ★unity build ⇒ Makefile 里绝不许出现这两个 .o★
+          ! grep -q "feature/cpu_spoof.o" kernel/Makefile 2>/dev/null || { echo "::error title=A29::Makefile 里混进了 cpu_spoof.o（unity build 会重复编译）"; exit 1; }
+          ! grep -q "feature/uts_spoof.o" kernel/Makefile 2>/dev/null || { echo "::error title=A29::Makefile 里混进了 uts_spoof.o"; exit 1; }
+          python3 - <<'PYBAL29'
+          import io
+          for f in ["include/uapi/supercall.h", "supercall/dispatch.c", "ksu.c"]:
+              t = io.open(f, encoding="utf-8").read()
+              assert t.count("{") == t.count("}"), f + " 花括号不平衡"
+              assert t.count("(") == t.count(")"), f + " 圆括号不平衡"
+          print("  A29 结构平衡自检通过")
+          PYBAL29
+          echo "::notice title=A29（uapi5 伪装接口）::SET_SPOOF_VERSION/SET_SPOOF_CPU 两个 ioctl 已补齐（照搬 dev 分支 4cd7415a 的实现），并登记进 ksu.c 的 unity 列表。至此 ksud 用到的 18 个 ioctl 内建内核★全部支持★，与 SukiSU Ultra 最新版一致。5.4 可行性已逐条核对（vdso_data 数组语义、VDSO_CLOCKMODE_ARCHTIMER、ARM64_WORKAROUND_1418040、curr_clocksource、loops_per_jiffy、elf_hwcap 全在）。"
       - name: SELinux hide 补齐 ksu_get_uid_t / ksu_late_loaded / ksu_policy_rwlock_ptr（第 3 轮）
         if: ${{ inputs.enable_ksu && inputs.keep_selinux_hide }}
         env:
