@@ -3303,24 +3303,56 @@ jobs:
           echo "KPM 注入方式 = $KPM_KIND"
 
           if [ "$KPM_KIND" = "upstream" ]; then
-            # ── 官方最新 0.13.9：kptools-linux + kpimg-android ──
-            KPT_SHA=6b9a56ac7db12ae1b76e6580ee52784019d6766453505d491a1ae39263205956
-            KPI_SHA=eb2e3d16fe69410150efcf6f9425baf8cad9ac0c39f051fc8b40ce57c7143adb
-            KBASE="https://github.com/bmax121/KernelPatch/releases/download/0.13.9"
-            curl -fsSL --retry 3 -o "$KT/kptools-linux"  "$KBASE/kptools-linux"
-            curl -fsSL --retry 3 -o "$KT/kpimg-android" "$KBASE/kpimg-android"
-            echo "$KPT_SHA  $KT/kptools-linux"  | sha256sum -c -
-            echo "$KPI_SHA  $KT/kpimg-android" | sha256sum -c -
-            chmod +x "$KT/kptools-linux"
-            KPI_VER=$(python3 -c "d=open('$KT/kpimg-android','rb').read(); print(int.from_bytes(d[6:10],'big'))")
-            echo "kpimg-android 大小 = $(stat -c%s "$KT/kpimg-android") 字节，内部次版本号 = $KPI_VER（期望 9 = 0.13.9）"
-            # kptools 自己能报 kpimg 版本（-v 配合 -k）—— 比解析字节更权威
-            "$KT/kptools-linux" -v -k "$KT/kpimg-android" 2>&1 | sed 's/^/    kptools -v -k: /' || true
+          # ── 官方最新 0.13.9：kptools-linux + kpimg-android ──
+          KPT_SHA=6b9a56ac7db12ae1b76e6580ee52784019d6766453505d491a1ae39263205956
+          KPI_SHA=eb2e3d16fe69410150efcf6f9425baf8cad9ac0c39f051fc8b40ce57c7143adb
+          KBASE="https://github.com/bmax121/KernelPatch/releases/download/0.13.9"
+          curl -fsSL --retry 3 -o "$KT/kptools-linux"  "$KBASE/kptools-linux"
+          curl -fsSL --retry 3 -o "$KT/kpimg-android" "$KBASE/kpimg-android"
+          echo "$KPT_SHA  $KT/kptools-linux"  | sha256sum -c -
+          echo "$KPI_SHA  $KT/kpimg-android" | sha256sum -c -
+          chmod +x "$KT/kptools-linux"
+          KPI_VER=$(python3 -c "d=open('$KT/kpimg-android','rb').read(); print(int.from_bytes(d[6:10],'big'))")
+          echo "kpimg-android 大小 = $(stat -c%s "$KT/kpimg-android") 字节，内部次版本号 = $KPI_VER（期望 9 = 0.13.9）"
+
+          # ★★ glibc 兼容问题（实测踩到）★★
+          #   0.13.9 的 kptools-linux 是在 Ubuntu 24.04 上编的，需要 GLIBC_2.38；
+          #   而本 workflow 跑在 ubuntu-22.04（glibc 2.35）⇒ 直接跑会报
+          #     "version `GLIBC_2.38' not found (required by kptools-linux)"，退出码 1。
+          #   修法：用一个 glibc 够新的容器来跑它（GitHub 的 ubuntu runner 自带 docker）。
+          #   容器里以当前用户身份运行，免得 oImage 变成 root 属主、后面读不了。
+          RAN=no
+          if command -v docker >/dev/null 2>&1; then
+            cp -f "$KT/kptools-linux" "$KT/kpimg-android" "$KD/" 2>/dev/null || true
+            if docker run --rm --user "$(id -u):$(id -g)" -v "$KD:/w" -w /w ubuntu:24.04          ./kptools-linux -p -s 123 -i Image -k kpimg-android -o oImage > "$LOG" 2>&1; then
+              PRC=0; RAN=yes
+              echo "kptools 通过 docker(ubuntu:24.04) 执行成功"
+            else
+              PRC=$?
+              echo "docker 方式失败（退出码 $PRC），日志："
+              cat "$LOG" || true
+            fi
+            # 顺便在容器里报一次版本（-v -k），权威且不受宿主 glibc 影响
+            docker run --rm --user "$(id -u):$(id -g)" -v "$KD:/w" -w /w ubuntu:24.04       ./kptools-linux -v -k kpimg-android 2>&1 | sed 's/^/    kptools -v -k: /' || true
+            rm -f "$KD/kptools-linux" "$KD/kpimg-android"
+          else
+            echo "::warning::runner 上没有 docker，只能直接跑 kptools（宿主 glibc 2.35 可能不够）"
+          fi
+
+          if [ "$RAN" != "yes" ]; then
             set +e
             "$KT/kptools-linux" -p -s 123 -i Image -k "$KT/kpimg-android" -o oImage > "$LOG" 2>&1
             PRC=$?
             set -e
-            echo "kptools-linux 退出码 = $PRC"
+            echo "直接跑 kptools-linux 退出码 = $PRC"
+            [ "$PRC" = "0" ] && RAN=yes
+          fi
+
+          if [ "$RAN" != "yes" ]; then
+            echo "::warning title=KPM upstream 失败，自动回退 sukisu 版::0.13.9 的 kptools 在本 runner 上跑不起来（glibc 不兼容）。改用 SukiSU 配套的 patch_linux（kpimg 0.13.0）注入，保证 KPM 不丢。"
+            KPM_KIND=sukisu
+            KPM_FELL_BACK=yes
+          fi
           else
             # ── SukiSU 配套版 0.13.0（patch_linux 壳）──
             # ★下载地址钉到 commit 547ae94bcaec，不再用 main 分支★
