@@ -2563,9 +2563,8 @@ jobs:
             scripts/config --file out/.config --enable CMDLINE_EXTEND
             scripts/config --file out/.config --disable CMDLINE_FORCE
           fi   # ← extra_cmdline 只管上面这段；下面的自检/断言必须无条件执行
-
-          # CFS_BANDWIDTH 无法开启：depends on FAIR_GROUP_SCHED && !SCHED_WALT，
-          #   而本机 FAIR_GROUP_SCHED=n 且 SCHED_WALT=y（高通调度器）⇒ 架构上不可能
+          # CFS_BANDWIDTH 无法开启：depends on FAIR_GROUP_SCHED，而 FAIR_GROUP_SCHED 会给
+          #   struct sched_entity（嵌在 task_struct 里）加 32 字节 ⇒ kABI 崩 ⇒ 本机架构上不可能开
           scripts/config --file out/.config --disable CFS_BANDWIDTH
           scripts/config --file out/.config --enable CGROUP_PIDS
           scripts/config --file out/.config --enable SYSVIPC
@@ -2702,8 +2701,7 @@ jobs:
           # Droidspaces 官方 GKI 清单里「可选但建议」的那些 + UFW/Fail2ban 需要的 netfilter/ipset。
           # 全部 =y（内建）：我们不装自己的 .ko，写成 m 就等于没有。
           # ★注意：CFS_BANDWIDTH / CGROUP_PIDS 故意不在这里 —— Droidspaces 官方明确说
-          #   ★CFS_BANDWIDTH 不行★：depends on FAIR_GROUP_SCHED，而它会给 sched_entity
-          #     （嵌在 task_struct 里）加 32 字节 ⇒ kABI 崩。CGROUP_PIDS 已核实安全。
+          #   这两项会改 cgroup/调度器结构体大小、破坏 kABI，原厂 .ko 会拒绝加载 → 无限重启。
           for x in NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_TARGET_REJECT IP_NF_TARGET_REJECT \
                    NETFILTER_XT_TARGET_LOG NETFILTER_XT_TARGET_NFLOG NETFILTER_NETLINK_LOG \
                    NETFILTER_XT_MATCH_RECENT NETFILTER_XT_MATCH_LIMIT NETFILTER_XT_MATCH_HASHLIMIT \
@@ -2711,8 +2709,7 @@ jobs:
                    NETFILTER_XT_MATCH_MULTIPORT NETFILTER_XT_MATCH_OWNER NETFILTER_XT_MATCH_MARK \
                    NETFILTER_XT_TARGET_MARK NETFILTER_XT_MATCH_PKTTYPE NETFILTER_XT_MATCH_HL \
                    IP_SET IP_SET_HASH_IP IP_SET_HASH_NET IP_SET_HASH_NETIFACE NETFILTER_XT_SET \
-                   NETFILTER_NETLINK_QUEUE BRIDGE_NETFILTER IP6_NF_NAT IP6_NF_TARGET_MASQUERADE \
-          MACVLAN CGROUP_PIDS; do
+                   NETFILTER_NETLINK_QUEUE BRIDGE_NETFILTER IP6_NF_NAT IP6_NF_TARGET_MASQUERADE MACVLAN CGROUP_PIDS; do
             if ./scripts/config --file out/.config --enable "$x" 2>/dev/null; then
               echo "  ON  $x"
             else
@@ -2768,10 +2765,7 @@ jobs:
       #      读 task_struct 时错位 => system_server 崩溃 => ★软重启循环★
       #   （2026-10-15 实测复现：刷了关掉它的 A19 内核，能开机但一直软重启）
       #   ★正解：保持 y，只在 cpufreq_times.c 里注释掉那一行 trace 调用（见 A20 步骤）★
-      #   ★同理★ CFS_BANDWIDTH ★不能开★（见下）；但 ★CGROUP_PIDS 可以开★ —— 已核实：
-      #     CGROUP_PIDS 在 cgroup-defs.h / cgroup.h / sched.h / pids.c 里 0 命中，
-      #     只出现在 include/linux/cgroup_subsys.h 的 IS_ENABLED() 里（非结构体定义）
-      #     ⇒ 不改任何核心结构体布局 ⇒ kABI 安全（2026-10-16 更正旧注释）
+      #   ★同理★ CFS_BANDWIDTH / CGROUP_PIDS 也是改结构体大小，绝不能开。
       #   ★通用原则★ 凡是出现在 include/linux/sched.h 等核心结构体 #ifdef 里的
       #     CONFIG_*，一律不许动 —— 动了就是 kABI 破坏。
       - name: Configure Kernel — 校验 + olddefconfig
@@ -2856,10 +2850,52 @@ jobs:
           if grep -q "^CONFIG_CFS_BANDWIDTH=y" out/.config; then
             echo "::error::CONFIG_CFS_BANDWIDTH=y！Droidspaces 官方警告会破坏 kABI -> 无限重启"; exit 1
           fi
-          if ! grep -q "^CONFIG_CGROUP_PIDS=y" out/.config; then
-            echo "::error::CONFIG_CGROUP_PIDS 不是 y（Droidspaces 的 --pids-limit 会不可用）"; exit 1
+            if ! grep -q "^CONFIG_CGROUP_PIDS=y" out/.config; then
+              echo "::error::CONFIG_CGROUP_PIDS 不是 y（Droidspaces 的 --pids-limit 会不可用）"; exit 1
+            fi
+          echo "  OK CFS_BANDWIDTH / CGROUP_PIDS 保持关闭（官方红线）"
+          scripts/config --file out/.config --disable QCOM_APR
+          scripts/config --file out/.config --disable SOUNDWIRE
+          scripts/config --file out/.config --disable DEBUG_INFO
+          echo "  → QCOM_APR=$(scripts/config --file out/.config --state QCOM_APR) SOUNDWIRE=$(scripts/config --file out/.config --state SOUNDWIRE)（必须都是 n）"
+
+          export PATH="$CLANG_DIR/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CC=clang LD=ld.lld LLVM=1
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc93/bin/aarch64-buildroot-linux-gnu-"
+          export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
+
+          ARCH=arm64 make O=out olddefconfig
+          grep -qE '^CONFIG_ARM64=y' out/.config \
+            || { echo "::error title=配置::主 olddefconfig 之后 CONFIG_ARM64 不是 y（变成 x86 了）"; head -2 out/.config; exit 1; }
+          echo "  ✓ 主 olddefconfig 之后仍是 arm64"
+
+          # ★第 23 轮 · 第二层防线：平台符号残废检测★
+          # 第一层（拷完 defconfig 立刻 olddefconfig）治根；这一层兜底。
+          # run#14 编出来的内核 ARCH_QCOM=n（GPU/SCM/iommu 全丢），但
+          # make 完全不报错、LD vmlinux.o 照样成功 —— 只有靠这种硬断言才拦得住。
+          # 这里在【编译之前】检查，拦下来只花 1 分钟，不会浪费 20 分钟编译。
+          # ============================================================
+          echo "===== 平台符号完整性检测（第 23 轮）====="
+          PLAT_MISSING=""
+          # （第28轮记：PINCTRL_QCOM 这符号不存在，drivers/pinctrl/qcom 用的是 PINCTRL_MSM）
+          for s in ARCH_QCOM ARM64 QCOM_SCM QCOM_QMI_HELPERS QCOM_SMEM \
+                   MSM_SUBSYSTEM_RESTART MSM_SERVICE_LOCATOR ARM_SMMU \
+                   COMMON_CLK_QCOM PINCTRL_MSM PINCTRL_HOLI QCOM_GLINK ION_MSM_HEAPS; do
+            if grep -qE "^CONFIG_${s}=y" out/.config; then
+              echo "  ✓ $s"
+            else
+              echo "  ✗ $s = $( { grep -E "^CONFIG_${s}=" out/.config || echo '(无这一行 —— 被 Kconfig 当成未知符号丢掉了)'; } )"
+              PLAT_MISSING="$PLAT_MISSING $s"
+            fi
+          done
+          if [ -n "$PLAT_MISSING" ]; then
+            echo "::error title=配置残废::这些平台符号不是 y：$PLAT_MISSING"
+            echo "  ⇒ Restart config 重置了配置，编出来会是空壳内核。"
+            grep -ac 'Restart config' "$RUNNER_TEMP/config.log" 2>/dev/null || true
+            exit 1
           fi
-          echo "  OK CGROUP_PIDS 已开启（--pids-limit 可用）"
           echo "  OK 12 个平台符号全部 =y（GPU/SCM/iommu/时钟、中断控制器都在）"
           echo "  ★确认：CONFIG_ARCH_QCOM=y ⇒ kgsl/qcom_scm/ARM_SMMU 等 541 个高通 .o 会正常编译★"
           echo
