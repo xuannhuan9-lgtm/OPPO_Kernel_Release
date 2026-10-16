@@ -59,12 +59,12 @@ on:
         type: boolean
         default: true
       kpm_kpimg:
-        description: 'KPM 注入用哪套 kpimg。upstream=KernelPatch 官方最新 0.13.9（kptools-linux + kpimg-android，ANDROID=1 构建给 Android 内核）；sukisu=SukiSU 配套版 0.13.0（patch_linux 壳，历史默认，最稳）。两者都钉 SHA256'
+        description: 'KPM 注入用哪套 kpimg。sukisu=★默认，已实测可用★ SukiSU 配套版 0.13.0（patch_linux 壳，内嵌他们定制过的 kpimg，能对接 SukiSU 的 stub）；upstream=KernelPatch 官方 0.13.9（kptools-linux + kpimg-android）★实测不兼容★：Image 会大 298KB 但 kpimg 根本不启动（dmesg 里没有 KP KernelPatch Version / KP hook sukisu_kpm_* 行），面具里看不到 KPM。两者都钉 SHA256'
         type: choice
         options:
-          - 'upstream'
           - 'sukisu'
-        default: 'upstream'
+          - 'upstream'
+        default: 'sukisu'
       ksu_manager_package:
         description: '面具包名。留空=内核自动扫描认领（推荐）。SukiSU Ultra 的 spoofed 版包名随机，要填得先用 adb 查真实包名'
         type: string
