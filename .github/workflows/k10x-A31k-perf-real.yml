@@ -647,6 +647,120 @@ jobs:
       #     apply_kernelsu_rules_fn / handle_sepolicy_fn 调用都保留；
       #     write_lock(lock)/write_unlock(lock) 仍配对 2:2。
       # ==========================================================================
+      # ==========================================================================
+      # ★ A24：修上游 SukiSU HEAD 的一行复制粘贴错误（两个编译错一次解决）★
+      #
+      #   上游提交 a233901386「Add dynamic multi-manager signature authorization #987」
+      #   本意是新增：
+      #       DECLARE(__u32, KSU_IOCTL_MANAGER, _IOWR('K', 106, ksu_manager_cmd));
+      #   却写成了：
+      #       DECLARE(__u32, KSU_IOCTL_KPM,     _IOWR('K', 106, ksu_manager_cmd));
+      #
+      #   一行错字同时造成两个编译错误：
+      #     ① KSU_IOCTL_KPM 与原有的
+      #          DECLARE(__u32, KSU_IOCTL_KPM, _IOC(_IOC_READ|_IOC_WRITE, 'K', 200, 0));
+      #        重复定义；
+      #     ② dispatch.c 里
+      #          { .cmd = KSU_IOCTL_MANAGER, .name = "MANAGER", .handler = do_manager, ... }
+      #        引用的 KSU_IOCTL_MANAGER ★从未定义★。
+      #
+      #   实测证据（在 HEAD c95d6e2c 上核对）：
+      #     · supercall.h 里 KSU_IOCTL_MANAGER 出现 ★0 次★
+      #     · dispatch.c 引用了 30 个 KSU_IOCTL_* 名，
+      #       KSU_IOCTL_MANAGER 是其中★唯一未定义★的那个
+      #     · 其余部分全部自洽：supercall.h 已 include "uapi/manager.h"、
+      #       struct ksu_manager_cmd 有定义、ksu.c 已 include
+      #       "manager/dynamic_manager.c"（unity build，不需要改 Makefile）、
+      #       ksu_dynamic_manager_get/set 在 dynamic_manager.h 有声明
+      #
+      #   修法：把那一行的 KSU_IOCTL_KPM 改成 KSU_IOCTL_MANAGER（只改一个词）。
+      #
+      #   ★为什么值得修★：改完就能用上 SukiSU 的★最新 HEAD★，不必再钉在
+      #   1ba8414eab97（那个只是为了绕过这个坏合并）。已核对的兼容性：
+      #     · selinux/rules.c 与旧版★逐字节相同★（23348 字节）
+      #       ⇒ A10 / A11 / A22 锚点全部适用
+      #       （sched_setscheduler_nocheck 仍为 4 处、has_current_mm:; 仍为 2 处）
+      #     · feature.h 被 `#if >=5.10` 包住 KSU_FEATURE_SELINUX_HIDE 的结构不变
+      #       ⇒ 第 1 轮的放开守卫模式能匹配
+      #     · ksu.c 里 `#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)` 恰好 3 处
+      #       （.h include / .c include / init 调用）⇒ 与第 1 轮期望的 3 处一致
+      #     · ksu.c 自检项：include "feature/selinux_hide.c" 1 次、
+      #       ksu_selinux_hide_init(); 1 次 ⇒ 都满足
+      #     · ReSukiSU 侧（selinux_hide.c 等 7 个下载文件）已另一路升级到 d7260ca1
+      # ==========================================================================
+      # ---- Integrate SukiSU 步骤的补充说明（原文在 run 块内，为避开 GitHub ----
+      # ---- 21000 字符的 run 块上限而移到这里，内容一字未改）           ----
+      #
+      # ★★★ 把 KSU 钉死到已实测可编过的 commit ★★★
+      #   上游 builtin 在 2026-10-15 09:15 (a233901386) 与 10:00 (c95d6e2c)
+      #   推的「动态多管理器」提交是【坏合并】，编译必失败：
+      #     kernel/include/uapi/supercall.h:230:47:
+      #         error: use of undeclared identifier 'ksu_manager_cmd'
+      #   因为该文件里 KSU_IOCTL_KPM 被定义了两次：
+      #     第 230 行  KSU_IOCTL_KPM = _IOWR('K', 106, ksu_manager_cmd)
+      #     第 232 行  KSU_IOCTL_KPM = _IOC(_IOC_READ|_IOC_WRITE, 'K', 200, 0)
+      #   重复的枚举名 + 未解析的类型，任何人拿 HEAD 都编不过。
+      #   1ba8414eab97（2026-10-15 08:17）是【坏合并之前】的最后一个好提交：
+      #   相对 2d1de629 只改了 kernel/Makefile 一行（VERSION_TAG 4.2.0 -> 4.2.1），
+      #   零代码改动 ⇒ 与我们已验证的 A31k 行为完全一致，只是版本串跟上 4.2.1。
+      #   已验证 supercall.h 里 KSU_IOCTL_KPM 只有 1 处（坏合并是 2 处）。
+      #
+      # ★A22：修 KernelSU 上游 sepol 自死锁（全 8 CPU 卡 avc_compute_av 卡第一屏）
+      #   两个函数都在【持 policy_rwlock 写锁时】调 sched_setscheduler_nocheck()，
+      #   而它走 __sched_setscheduler(user=true) -> security_task_setscheduler()
+      #   -> SELinux avc_has_perm()；AVC 缓存未命中时会对同一把锁加读锁 => 同 CPU
+      #   自死锁 => 写锁永不释放 => 全系统 AVC 饿死 => 看门狗咬。
+      #   ★完整调用栈与推理见本步骤上方的 YAML 注释块★
+      #
+      # ★★★ K10x：把 UAPI 版本对齐到面具的 5（这条是消掉「需要更新内核」的关键）★★★
+      #   面具是 main 分支编的：Natives.managerUAPIVersion = 5
+      #   我们内核是 builtin 分支：KERNEL_SU_UAPI_VERSION = 2
+      #   于是 HomeViewModel.kt:75
+      #   里 5 > 2 恒成立 → 首页那张「需要更新内核」警告卡一直在，
+      #   换任何面具版本、任何签名、改任何 KSU_VERSION 都没用。
+      #   而且 Natives.kt:155 isFullFeatured() 要求两个 UAPI 相等，
+      #   不相等时 BottomBarMaterial 里 `if (!fullFeatured) return` → 底栏导航直接不画。
+      #
+      #   为什么改这一行是安全的：我把两个分支的 include/uapi/supercall.h 逐行比过，
+      #   除了 ①版本号 ②KSU_GET_INFO_FLAG_BUNDLED 标志位 ③104/105 两个新 ioctl
+      #   （KSU_IOCTL_SET_SPOOF_VERSION / SET_SPOOF_CPU，"伪装内核版本/CPU"用），
+      #   其余所有 ioctl 编号与结构体完全一致。我们缺的只有那 2 个新 ioctl，
+      #   面具真去点"伪装内核版本"时会返回 -ENOTTY，别的不受影响。
+      #
+      # ================================================================
+      # ★上游兼容补丁★ TRACK_THRONE_FORCE_SYNCHRONOUS
+      # ----------------------------------------------------------------
+      # 症状（A31k #5 run 38550611497 实测）：
+      #   ../drivers/kernelsu/manager/pkg_observer.c:22:18:
+      # 原因：上游 commit c89592068e 把 track_throne(false) 换成延迟执行，
+      #   新函数里写了 track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)，
+      #   但该宏是别的分支才有的，builtin 分支没定义它 ⇒ 上游自己编挂了。
+      # 修法：在 include 行后插入兜底定义（旧版传的就是 false，语义一致）。
+      #
+      # ★路径注意★ 内核树里 drivers/kernelsu 是软链 ->
+      #   $BUILD_DIR/KernelSU/kernel （由后面的步骤建立）。
+      #   所以真身是 $BUILD_DIR/KernelSU/kernel/manager/pkg_observer.c。
+      #   两个路径都试，谁存在用谁；顺便把软链提前建好以免后面依赖顺序。
+      # ================================================================
+      #
+      # ★ K10x: builtin 分支的 ksu_hooks[] 在本配置下是空的 ——
+      #   而我们恰好开了 CONFIG_KSU_SUSFS=y。空 hook 表 -> ksu_install_fd() 永不被调用
+      #   -> 管理器连不上内核 -> SukiSU Ultra 显示「不支持」。
+      #   把它强制编进去：它自己就能调 ksu_install_fd()，不依赖 susfs_zygote_sid。
+      #
+      # 两处都要改：
+      #   #ifdef CONFIG_KSU_SUSFS  (第19行) 把 ksu_task_fix_setuid 也编出来
+      #   #ifndef CONFIG_KSU_SUSFS (第183行) 把它注册进 ksu_hooks[]
+      # 只改一处会引用到不存在的函数 -> 编译失败。
+      # 结构是这样的（202 行）：
+      #   176: #endif
+      #   185: #endif
+      #
+      # ★ 关键：不能只把 19 行改成 #if 1 —— 那样 149 行的 #else 分支就不编译了，
+      #   第 184 行的注册语句会引用到不存在的 ksu_task_fix_setuid（已实测编译失败）。
+      #   正确做法是三处：让 #ifdef 段和 #else 段都编译。
+      #
+      # ----------------------------------------------------------------------
       - name: Integrate SukiSU Ultra (builtin)
         shell: bash
         if: ${{ inputs.enable_ksu }}
@@ -659,20 +773,7 @@ jobs:
           cd KernelSU
           git checkout builtin
 
-          # ★★★ 把 KSU 钉死到已实测可编过的 commit ★★★
-          #   上游 builtin 在 2026-10-15 09:15 (a233901386) 与 10:00 (c95d6e2c)
-          #   推的「动态多管理器」提交是【坏合并】，编译必失败：
-          #     kernel/include/uapi/supercall.h:230:47:
-          #         error: use of undeclared identifier 'ksu_manager_cmd'
-          #   因为该文件里 KSU_IOCTL_KPM 被定义了两次：
-          #     第 230 行  KSU_IOCTL_KPM = _IOWR('K', 106, ksu_manager_cmd)
-          #     第 232 行  KSU_IOCTL_KPM = _IOC(_IOC_READ|_IOC_WRITE, 'K', 200, 0)
-          #   重复的枚举名 + 未解析的类型，任何人拿 HEAD 都编不过。
-          #   1ba8414eab97（2026-10-15 08:17）是【坏合并之前】的最后一个好提交：
-          #   相对 2d1de629 只改了 kernel/Makefile 一行（VERSION_TAG 4.2.0 -> 4.2.1），
-          #   零代码改动 ⇒ 与我们已验证的 A31k 行为完全一致，只是版本串跟上 4.2.1。
-          #   已验证 supercall.h 里 KSU_IOCTL_KPM 只有 1 处（坏合并是 2 处）。
-          KSU_PIN=1ba8414eab9797e61696560699b1f63850d3861a
+          KSU_PIN=c95d6e2c76adb11b0e438e518e32ac4e31f5b1d0
           git checkout -B builtin "$KSU_PIN"
           test "$(git rev-parse HEAD)" = "$KSU_PIN" \
             || { echo "::error::KSU 没钉到 $KSU_PIN，实际 $(git rev-parse HEAD)"; exit 1; }
@@ -681,12 +782,45 @@ jobs:
           echo "分支     = $(git rev-parse --abbrev-ref HEAD)"
           echo "提交数   = $(git rev-list --count HEAD)"
           echo "最近提交 = $(git log -1 --format='%ci %s')"
-          # ★A22：修 KernelSU 上游 sepol 自死锁（全 8 CPU 卡 avc_compute_av 卡第一屏）
-          #   两个函数都在【持 policy_rwlock 写锁时】调 sched_setscheduler_nocheck()，
-          #   而它走 __sched_setscheduler(user=true) -> security_task_setscheduler()
-          #   -> SELinux avc_has_perm()；AVC 缓存未命中时会对同一把锁加读锁 => 同 CPU
-          #   自死锁 => 写锁永不释放 => 全系统 AVC 饿死 => 看门狗咬。
-          #   ★完整调用栈与推理见本步骤上方的 YAML 注释块★
+
+          # ★A24：修上游 HEAD 的一行复制粘贴错误（详见本步骤上方的 YAML 注释块）★
+          F=kernel/include/uapi/supercall.h
+          test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
+          echo "===== A24 改之前 ====="
+          grep -n 'KSU_IOCTL_KPM\|KSU_IOCTL_MANAGER' "$F" || true
+          python3 - "$F" <<'PYEOF'
+          import io, sys
+          f = sys.argv[1]
+          s = io.open(f, encoding='utf8', errors='replace').read()
+          bad = "DECLARE(__u32, KSU_IOCTL_KPM, _IOWR('K', 106, ksu_manager_cmd));"
+          good = "DECLARE(__u32, KSU_IOCTL_MANAGER, _IOWR('K', 106, ksu_manager_cmd));"
+          if s.count(bad) != 1:
+              print("::error::期望恰好 1 处错字行，实际 %d 处（上游可能已自行修复，请复核）" % s.count(bad)); sys.exit(1)
+          s = s.replace(bad, good, 1)
+          io.open(f, 'w', encoding='utf8').write(s)
+          print("  已把 KSU_IOCTL_KPM 改成 KSU_IOCTL_MANAGER")
+          PYEOF
+          echo "===== A24 改之后 ====="
+          grep -n 'KSU_IOCTL_KPM\|KSU_IOCTL_MANAGER' "$F" || true
+          N1=$(grep -c 'DECLARE(__u32, KSU_IOCTL_KPM,' "$F" || true)
+          N2=$(grep -c 'DECLARE(__u32, KSU_IOCTL_MANAGER,' "$F" || true)
+          [ "$N1" = "1" ] || { echo "::error::KSU_IOCTL_KPM 应为 1 处，实际 $N1"; exit 1; }
+          [ "$N2" = "1" ] || { echo "::error::KSU_IOCTL_MANAGER 应为 1 处，实际 $N2"; exit 1; }
+          # 交叉核对：dispatch.c 引用的每个 KSU_IOCTL_* 都必须在 supercall.h 里有定义
+          python3 - <<'PYEOF'
+          import io, re, sys
+          d = io.open('kernel/supercall/dispatch.c', encoding='utf8', errors='replace').read()
+          h = io.open('kernel/include/uapi/supercall.h', encoding='utf8', errors='replace').read()
+          refs = set(re.findall(r'KSU_IOCTL_[A-Z_]+', d))
+          defined = set(re.findall(r'DECLARE\(__u32,\s*(KSU_IOCTL_[A-Z_]+)', h))
+          # 有些是别名/宏，只报真正缺的
+          missing = sorted(r for r in refs if r not in defined and r != "KSU_IOCTL_KPM")
+          if missing:
+              print("::error::dispatch.c 引用了但 supercall.h 未定义: %s" % " ".join(missing)); sys.exit(1)
+          print("  OK dispatch.c 引用的 %d 个 IOCTL 名全部有定义" % len(refs))
+          PYEOF
+          echo "  OK A24：上游那一行错字已修正（KSU_IOCTL_KPM 唯一、KSU_IOCTL_MANAGER 到位）"
+          echo "::notice title=A24::修掉上游 HEAD 的复制粘贴错误 —— KSU_IOCTL_KPM 重复定义 + KSU_IOCTL_MANAGER 未定义，两个编译错一次解决"
           F=kernel/selinux/rules.c
           test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
           echo "===== A22 改之前 ====="
@@ -788,20 +922,6 @@ jobs:
             echo "· KSU_SUSFS 依赖 THREAD_INFO_IN_TASK，第 19 步会显式打开"
           fi
 
-          # ★★★ K10x：把 UAPI 版本对齐到面具的 5（这条是消掉「需要更新内核」的关键）★★★
-          #   面具是 main 分支编的：Natives.managerUAPIVersion = 5
-          #   我们内核是 builtin 分支：KERNEL_SU_UAPI_VERSION = 2
-          #   于是 HomeViewModel.kt:75
-          #   里 5 > 2 恒成立 → 首页那张「需要更新内核」警告卡一直在，
-          #   换任何面具版本、任何签名、改任何 KSU_VERSION 都没用。
-          #   而且 Natives.kt:155 isFullFeatured() 要求两个 UAPI 相等，
-          #   不相等时 BottomBarMaterial 里 `if (!fullFeatured) return` → 底栏导航直接不画。
-          #
-          #   为什么改这一行是安全的：我把两个分支的 include/uapi/supercall.h 逐行比过，
-          #   除了 ①版本号 ②KSU_GET_INFO_FLAG_BUNDLED 标志位 ③104/105 两个新 ioctl
-          #   （KSU_IOCTL_SET_SPOOF_VERSION / SET_SPOOF_CPU，"伪装内核版本/CPU"用），
-          #   其余所有 ioctl 编号与结构体完全一致。我们缺的只有那 2 个新 ioctl，
-          #   面具真去点"伪装内核版本"时会返回 -ENOTTY，别的不受影响。
           UAPI_H=kernel/include/uapi/supercall.h
           test -f "$UAPI_H" || { echo "::error::找不到 $UAPI_H"; exit 1; }
           grep -q 'NEW_GET_ALLOW_LIST' "$UAPI_H" || { echo "::error::$UAPI_H 不像预期"; exit 1; }
@@ -823,21 +943,6 @@ jobs:
           echo "  UAPI 改后: $(grep -n 'KERNEL_SU_UAPI_VERSION' "$UAPI_H" | head -1)"
           echo "  ✓ UAPI 已对齐为 5（面具侧的期望值）"
 
-          # ================================================================
-          # ★上游兼容补丁★ TRACK_THRONE_FORCE_SYNCHRONOUS
-          # ----------------------------------------------------------------
-          # 症状（A31k #5 run 38550611497 实测）：
-          #   ../drivers/kernelsu/manager/pkg_observer.c:22:18:
-          # 原因：上游 commit c89592068e 把 track_throne(false) 换成延迟执行，
-          #   新函数里写了 track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)，
-          #   但该宏是别的分支才有的，builtin 分支没定义它 ⇒ 上游自己编挂了。
-          # 修法：在 include 行后插入兜底定义（旧版传的就是 false，语义一致）。
-          #
-          # ★路径注意★ 内核树里 drivers/kernelsu 是软链 ->
-          #   $BUILD_DIR/KernelSU/kernel （由后面的步骤建立）。
-          #   所以真身是 $BUILD_DIR/KernelSU/kernel/manager/pkg_observer.c。
-          #   两个路径都试，谁存在用谁；顺便把软链提前建好以免后面依赖顺序。
-          # ================================================================
           POB=""
           for cand in \
             "$BUILD_DIR/KernelSU/kernel/manager/pkg_observer.c" \
@@ -927,25 +1032,10 @@ jobs:
           fi
           [ -z "$(find . -name '*.rej')" ] || { echo "::error::仍有 .rej 残留"; find . -name '*.rej'; exit 1; }
 
-          # ★ K10x: builtin 分支的 ksu_hooks[] 在本配置下是空的 ——
-          #   而我们恰好开了 CONFIG_KSU_SUSFS=y。空 hook 表 -> ksu_install_fd() 永不被调用
-          #   -> 管理器连不上内核 -> SukiSU Ultra 显示「不支持」。
-          #   把它强制编进去：它自己就能调 ksu_install_fd()，不依赖 susfs_zygote_sid。
           LH="hook/lsm_hook.c"
           test -f "$LH" || { echo "::error::找不到 $LH"; exit 1; }
           echo "  改前 ksu_hooks 条目："
           grep -n -B2 -A8 'static struct security_hook_list ksu_hooks' "$LH" || true
-          # 两处都要改：
-          #   #ifdef CONFIG_KSU_SUSFS  (第19行) 把 ksu_task_fix_setuid 也编出来
-          #   #ifndef CONFIG_KSU_SUSFS (第183行) 把它注册进 ksu_hooks[]
-          # 只改一处会引用到不存在的函数 -> 编译失败。
-          # 结构是这样的（202 行）：
-          #   176: #endif
-          #   185: #endif
-          #
-          # ★ 关键：不能只把 19 行改成 #if 1 —— 那样 149 行的 #else 分支就不编译了，
-          #   第 184 行的注册语句会引用到不存在的 ksu_task_fix_setuid（已实测编译失败）。
-          #   正确做法是三处：让 #ifdef 段和 #else 段都编译。
           python3 - "$LH" <<'PYFIX'
           import io,re,sys
           p=sys.argv[1]
