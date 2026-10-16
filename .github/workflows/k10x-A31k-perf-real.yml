@@ -1643,6 +1643,40 @@ jobs:
           echo "$A29FIX_B64" | base64 -d > /tmp/a29_fix.py
           test -s /tmp/a29_fix.py || { echo "::error title=A29::补丁脚本解出来是空的"; exit 1; }
           python3 /tmp/a29_fix.py
+          # ── ②b ★5.4 兼容修正★（实测编译错：cpu_spoof.c 用了 5.10+ 才有的字段）──
+          #    error: no member named 'vdso_clock_mode' in 'struct clocksource'  ×3
+          #    ⇒ 5.4 的 struct clocksource 没有 vdso_clock_mode（5.10+ 才有），
+          #      5.4 用的是 clock->archdata.clock_mode。
+          #    ⇒ 修法：只把「curr_clocksource 那段」用 #if >= 5.10 包起来，5.4 上跳过；
+          #      其余伪装逻辑（cpu_data MIDR / loops_per_jiffy / elf_hwcap / vdso_data
+          #      / vdso_default / cpu_hwcaps）全部保留。
+          python3 - <<'PY54'
+          import io, sys
+          p = "feature/cpu_spoof.c"
+          t = io.open(p, encoding="utf-8").read()
+          if "K10x/A29-54" in t:
+              print("  (5.4 兼容补丁已在，跳过)"); sys.exit(0)
+          MARK = "                /* Resolve 'curr_clocksource' double pointer and overwrite active clock mode */"
+          ENDMARK = 'pr_warn("ksu: set_spoof_cpu failed to resolve \'curr_clocksource\'\\n");'
+          if MARK not in t:
+              print("::error title=A29-54::找不到 curr_clocksource 那段的开头"); sys.exit(1)
+          i = t.index(MARK)
+          j = t.index(ENDMARK, i)
+          k = t.index("}\n", j) + 2          # 该内层块的收尾 '}'
+          seg = t[i:k]
+          new = ("                /* K10x/A29-54: struct clocksource 在 5.4 没有 vdso_clock_mode 字段\n"
+                 "                 * （5.10+ 才有；5.4 用 clock->archdata.clock_mode），\n"
+                 "                 * 所以 5.4 跳过这一小段，其余伪装逻辑不受影响。 */\n"
+                 "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n"
+                 + seg +
+                 "#endif /* K10x/A29-54 */\n")
+          t = t[:i] + new + t[k:]
+          io.open(p, "w", encoding="utf-8").write(t)
+          print("  OK cpu_spoof.c: curr_clocksource 段已加 >=5.10 守卫（K10x/A29-54）")
+          PY54
+          grep -q "K10x/A29-54" feature/cpu_spoof.c
+          grep -q "LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)" feature/cpu_spoof.c
+          echo "  OK A29 已在 5.4 上做了 clocksource 字段兼容"
           # ── ③ 编译前自检 ──
           grep -q "KSU_GET_INFO_FLAG_BUNDLED"                 include/uapi/supercall.h
           grep -q "struct ksu_set_spoof_version_cmd"          include/uapi/supercall.h
