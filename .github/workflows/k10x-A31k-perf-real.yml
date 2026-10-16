@@ -761,6 +761,18 @@ jobs:
       #   正确做法是三处：让 #ifdef 段和 #else 段都编译。
       #
       # ----------------------------------------------------------------------
+      # ---- A24 修 ③ 说明（为避开 run 块 21000 上限移到这里）----
+      #   throne_tracker.c 的 pkg -> KSU_PACKAGE_NAME（同一个半成品提交的笔误）
+      #   第 64 行的 built-in 分支写的是 KSU_PACKAGE_NAME，第 97 行的 dynamic
+      #   分支却写成裸 pkg —— 而 pkg 只是第 45 行另一个函数里的局部变量，
+      #   所以在第 97 行它未声明（编译报 use of undeclared identifier 'pkg'）。
+      #   --------------------------------------------------------------
+      # ---- A24 修 ② 说明（为避开 run 块 21000 上限移到这里）----
+      #   _IOWR 展开成 sizeof(type)，需要的是类型名而不是 struct 标签；
+      #   上游只写了 ksu_manager_cmd ⇒ 报 use of undeclared identifier。
+      #   已把 good 串写成 "... _IOWR('K', 106, struct ksu_manager_cmd));"，
+      #   并在脚本里兜底扫描 _IO* 宏中所有裸 ksu_manager_cmd 用法。
+      #   --------------------------------------------------------------
       - name: Integrate SukiSU Ultra (builtin)
         shell: bash
         if: ${{ inputs.enable_ksu }}
@@ -792,13 +804,24 @@ jobs:
           import io, sys
           f = sys.argv[1]
           s = io.open(f, encoding='utf8', errors='replace').read()
+
+          # ── 修 ①：KSU_IOCTL_KPM -> KSU_IOCTL_MANAGER（上游复制粘贴错误）──
           bad = "DECLARE(__u32, KSU_IOCTL_KPM, _IOWR('K', 106, ksu_manager_cmd));"
-          good = "DECLARE(__u32, KSU_IOCTL_MANAGER, _IOWR('K', 106, ksu_manager_cmd));"
+          good = "DECLARE(__u32, KSU_IOCTL_MANAGER, _IOWR('K', 106, struct ksu_manager_cmd));"
           if s.count(bad) != 1:
-              print("::error::期望恰好 1 处错字行，实际 %d 处（上游可能已自行修复，请复核）" % s.count(bad)); sys.exit(1)
+              print("::error::期望恰好 1 处错字行，实际 %d 处（上游可能已自行修复，请复核）" % s.count(bad))
+              sys.exit(1)
           s = s.replace(bad, good, 1)
+
+          import re
+          for m in re.finditer(r"_IO[WR]*\([^)]*?,\s*([a-z_][a-z0-9_]*)\)", s):
+              ty = m.group(1)
+              if ty == "ksu_manager_cmd":
+                  print("::error::还有 _IO* 宏里用裸 ksu_manager_cmd（缺 struct）")
+                  sys.exit(1)
+
           io.open(f, 'w', encoding='utf8').write(s)
-          print("  已把 KSU_IOCTL_KPM 改成 KSU_IOCTL_MANAGER")
+          print("  已把 KSU_IOCTL_KPM 改成 KSU_IOCTL_MANAGER，并补上 struct 关键字")
           PYEOF
           echo "===== A24 改之后 ====="
           grep -n 'KSU_IOCTL_KPM\|KSU_IOCTL_MANAGER' "$F" || true
@@ -820,6 +843,33 @@ jobs:
           print("  OK dispatch.c 引用的 %d 个 IOCTL 名全部有定义" % len(refs))
           PYEOF
           echo "  OK A24：上游那一行错字已修正（KSU_IOCTL_KPM 唯一、KSU_IOCTL_MANAGER 到位）"
+          T=kernel/manager/throne_tracker.c
+          if [ -f "$T" ]; then
+            # 锚点必须带上上一行的 list_for_each_entry：
+            #   第 54 行（另一个函数里，pkg 是合法局部变量）缩进 12 空格且结尾有 " {"，
+            #   而 8 空格那串正是它的子串，单行锚点会数出 2 处。
+            python3 - "$T" <<'PYEOF'
+          import io, sys
+          f = sys.argv[1]
+          s = io.open(f, encoding='utf8', errors='replace').read()
+          old = ("    list_for_each_entry (np, list, list) {\n"
+                 "        if (strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME) == 0)")
+          new = ("    list_for_each_entry (np, list, list) {\n"
+                 "        if (strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME) == 0)")
+          n = s.count(old)
+          if n != 1:
+              print("::error::pkg 多行锚点找到 %d 处（应为 1）" % n)
+              sys.exit(1)
+          s = s.replace(old, new, 1)
+          io.open(f, 'w', encoding='utf8').write(s)
+          print("  已把 throne_tracker.c 的裸 pkg 改成 KSU_PACKAGE_NAME")
+          PYEOF
+            grep -qF 'strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)' "$T" \
+              || { echo "::error::pkg 没改成 KSU_PACKAGE_NAME"; exit 1; }
+            BARE=$(grep -cE '^        if \(strncmp\(np->package, pkg,' "$T" || true)
+            [ "$BARE" = "0" ] || { echo "::error::还有 $BARE 处裸 pkg"; exit 1; }
+            echo "  OK A24③：throne_tracker.c 的 pkg 已改成 KSU_PACKAGE_NAME"
+          fi
           echo "::notice title=A24::修掉上游 HEAD 的复制粘贴错误 —— KSU_IOCTL_KPM 重复定义 + KSU_IOCTL_MANAGER 未定义，两个编译错一次解决"
           F=kernel/selinux/rules.c
           test -f "$F" || { echo "::error::找不到 $F"; exit 1; }
@@ -1002,7 +1052,6 @@ jobs:
           patch -p1 -f < /tmp/sukisu_ultra_fixed.patch || true
 
           OTHERS=$(find . -name '*.rej' | grep -v '^\./runtime/ksud\.c\.rej$' || true)
-          # keep_selinux_hide=false 时，第 1 轮不会下载 feature/selinux_hide.c 与
           # infra/kernel_compat.h，本补丁对这两个文件的 hunk 必然失败 —— 那是预期内的，
           # 不算错误（否则关掉开关就无法编译）。
           if [ "${{ inputs.keep_selinux_hide }}" != "true" ]; then
