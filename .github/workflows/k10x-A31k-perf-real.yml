@@ -1401,6 +1401,7 @@ jobs:
           test -d "$KROOT" || { echo "::error title=A25::找不到 $KROOT"; exit 1; }
           echo "$A25FIX_B64" | base64 -d > /tmp/a25_fix.py
           test -s /tmp/a25_fix.py || { echo "::error title=A25::补丁脚本解出来是空的"; exit 1; }
+          cd "$KROOT"
           python3 /tmp/a25_fix.py
           # ── 编译前自检（缺一样就 fail，绝不带着半个补丁去编译）──
           grep -q "K10x/A25" selinux/rules.c
@@ -1500,6 +1501,7 @@ jobs:
           test -d "$KROOT" || { echo "::error title=A28::找不到 $KROOT"; exit 1; }
           echo "$A28FIX_B64" | base64 -d > /tmp/a28_fix.py
           test -s /tmp/a28_fix.py || { echo "::error title=A28::补丁脚本解出来是空的"; exit 1; }
+          cd "$KROOT"
           python3 /tmp/a28_fix.py
           # ── 编译前自检 ──
           grep -q "KERNEL_SU_UAPI_VERSION, 5" include/uapi/supercall.h
